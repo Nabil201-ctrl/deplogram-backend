@@ -45,6 +45,7 @@ export class AuthController {
   @ApiResponse({ status: 403, description: 'Sign-in is disabled' })
   signIn(
     @Body() body: SignInDto,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Viewer {
     if (process.env.SIGN_IN_ENABLED === 'false') {
@@ -62,6 +63,17 @@ export class AuthController {
     } catch {
       throw new UnauthorizedException('Invalid email or password');
     }
+    this.store.registerSession(
+      session.sessionToken,
+      session.viewer.id,
+      {
+        browser: req.headers['user-agent']?.split('/')[0] ?? 'unknown',
+        os: 'unknown',
+        device: /Mobile|Android|iPhone|iPad/.test(req.headers['user-agent'] ?? '') ? 'mobile' : 'desktop',
+        location: null,
+        ip: req.ip ?? '0.0.0.0',
+      },
+    );
     res.setHeader('Set-Cookie', this.sessionCookie(session.sessionToken));
     return session.viewer;
   }
@@ -79,6 +91,7 @@ export class AuthController {
   @ApiResponse({ status: 409, description: 'Email already registered' })
   signUp(
     @Body() body: SignUpDto,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Viewer {
     const name = typeof body?.name === 'string' ? body.name.trim() : '';
@@ -105,6 +118,17 @@ export class AuthController {
       email,
       password,
     });
+    this.store.registerSession(
+      sessionToken,
+      viewer.id,
+      {
+        browser: req.headers['user-agent']?.split('/')[0] ?? 'unknown',
+        os: 'unknown',
+        device: /Mobile|Android|iPhone|iPad/.test(req.headers['user-agent'] ?? '') ? 'mobile' : 'desktop',
+        location: null,
+        ip: req.ip ?? '0.0.0.0',
+      },
+    );
     res.setHeader('Set-Cookie', this.sessionCookie(sessionToken));
     return viewer;
   }

@@ -37,6 +37,7 @@ import {
   Viewer,
   Workspace,
 } from './types.js';
+import type { SecurityOverviewDto, SessionDto, TwoFactorSetupDto, NotificationEvent } from './account/dto.js';
 
 const MAX_REQUEST_LOG = 5000;
 const MAX_ACTIVITY_LOG = 500;
@@ -72,8 +73,6 @@ export class DeplogramStore {
   readonly requests: TrafficPoint[] = [];
   /** Variables per user, keyed like the account settings they configure. */
   private readonly preferences = new Map<string, AccountPreferences>();
-  /** Session token → user id. Powers cookie-based sign-in. */
-  readonly sessions = new Map<string, string>();
   /** The workspace drive: path → item. Folders carry totals; files carry their bytes. */
   readonly storage = new Map<string, StorageItem>();
   /** Uploaded file contents: path → the bytes (for previews). */
@@ -89,6 +88,32 @@ export class DeplogramStore {
 
   currentUser: User | null = null;
   connectedAccount: string | null = null;
+
+  // ── Security state ──────────────────────────────────────────────────────────
+
+  twoFactorEnabled = false;
+  twoFactorEnabledAt: string | null = null;
+  recoveryCodes: string[] = [];
+  passwordChangedAt: string | null = null;
+
+  /** Session token → session info (plus the owning user id). */
+  private readonly sessions = new Map<string, { id: string; browser: string; os: string; device: 'desktop' | 'mobile'; location: string | null; ip: string; lastActiveAt: string; createdAt: string; current: boolean; userId: string }>();
+
+  notificationSettings: { email: string; events: Record<NotificationEvent, boolean>; digest: 'off' | 'weekly' } = {
+    email: '',
+    events: {
+      deploy_failed: true,
+      service_crashed: true,
+      deploy_succeeded: false,
+      limit_near: true,
+      limit_reached: true,
+      new_sign_in: true,
+      api_keys: true,
+      product_updates: false,
+      tips: false,
+    },
+    digest: 'weekly',
+  };
 
   constructor() {
     this.seed();
@@ -766,7 +791,19 @@ export class DeplogramStore {
     sessionToken: string;
   } {
     const sessionToken = newId('sess');
-    this.sessions.set(sessionToken, user.id);
+    const now = new Date().toISOString();
+    this.sessions.set(sessionToken, {
+      id: sessionToken,
+      userId: user.id,
+      browser: 'unknown',
+      os: 'unknown',
+      device: 'desktop',
+      location: null,
+      ip: '0.0.0.0',
+      lastActiveAt: now,
+      createdAt: now,
+      current: true,
+    });
     this.currentUser = user;
     return { viewer: this.toViewer(user), sessionToken };
   }
@@ -780,8 +817,8 @@ export class DeplogramStore {
   setCurrentUserFromSession(sessionToken: string | null): void {
     this.currentUser = null;
     if (!sessionToken) return;
-    const userId = this.sessions.get(sessionToken);
-    if (userId) this.currentUser = this.users.get(userId) ?? null;
+    const session = this.sessions.get(sessionToken);
+    if (session) this.currentUser = this.users.get(session.userId) ?? null;
   }
 
   getViewer(): Viewer | null {
@@ -1363,6 +1400,141 @@ export class DeplogramStore {
       default:
         return 'latest';
     }
+  }
+
+  // ── Security ────────────────────────────────────────────────────────────────
+
+  getSecurityOverview(_userId: string): SecurityOverviewDto {
+    return {
+      passwordChangedAt: this.passwordChangedAt,
+      twoFactor: {
+        enabled: this.twoFactorEnabled,
+        enabledAt: this.twoFactorEnabledAt,
+        recoveryCodesLeft: this.recoveryCodes.length,
+      },
+    };
+  }
+
+  changePassword(userId: string, current: string, next: string): void {
+    const user = this.users.get(userId);
+    if (!user || user.password !== current) {
+      throw new Error('Current password is incorrect');
+    }
+    user.password = next;
+    this.passwordChangedAt = new Date().toISOString();
+  }
+
+  setupTwoFactor(): TwoFactorSetupDto {
+    const secret = Array.from({ length: 32 }, () => 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'[Math.floor(Math.random() * 32)]).join('');
+    return {
+      secret,
+      otpauthUrl: `otpauth://totp/Deplogram:user@deplogram.app?secret=${secret}`,
+    };
+  }
+
+  enableTwoFactor(code: string): { recoveryCodes: string[] } {
+    if (!/^\d{6}$/.test(code)) {
+      throw new Error('Invalid code');
+    }
+    this.twoFactorEnabled = true;
+    this.twoFactorEnabledAt = new Date().toISOString();
+    this.recoveryCodes = Array.from({ length: 10 }, () => Array.from({ length: 8 }, () => 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[Math.floor(Math.random() * 36)]).join(''));
+    return { recoveryCodes: [...this.recoveryCodes] };
+  }
+
+  disableTwoFactor(code: string): void {
+    if (!/^\d{6}$/.test(code)) {
+      throw new Error('Invalid code');
+    }
+    this.twoFactorEnabled = false;
+    this.twoFactorEnabledAt = null;
+    this.recoveryCodes = [];
+  }
+
+  newRecoveryCodes(): { recoveryCodes: string[] } {
+    if (!this.twoFactorEnabled) {
+      throw new Error('Two-factor is not enabled');
+    }
+    this.recoveryCodes = Array.from({ length: 10 }, () => Array.from({ length: 8 }, () => 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[Math.floor(Math.random() * 36)]).join(''));
+    return { recoveryCodes: [...this.recoveryCodes] };
+  }
+
+  // ── Sessions ────────────────────────────────────────────────────────────────
+
+  registerSession(sessionToken: string, userId: string, info: { browser: string; os: string; device: 'desktop' | 'mobile'; location: string | null; ip: string }): void {
+    const now = new Date().toISOString();
+    this.sessions.set(sessionToken, { id: sessionToken, userId, ...info, lastActiveAt: now, createdAt: now, current: true });
+    // Mark all other sessions as not current.
+    for (const [token, session] of this.sessions.entries()) {
+      if (token !== sessionToken) session.current = false;
+    }
+  }
+
+  touchSession(sessionToken: string): void {
+    const session = this.sessions.get(sessionToken);
+    if (session) session.lastActiveAt = new Date().toISOString();
+  }
+
+  getSessions(userId: string): SessionDto[] {
+    return [...this.sessions.values()]
+      .filter((s) => s.userId === userId)
+      .map(({ userId: _userId, ...rest }) => rest);
+  }
+
+  endSession(sessionToken: string): boolean {
+    return this.sessions.delete(sessionToken);
+  }
+
+  endOtherSessions(currentSessionToken: string): void {
+    for (const [token] of this.sessions.entries()) {
+      if (token !== currentSessionToken) this.sessions.delete(token);
+    }
+  }
+
+  // ── Notifications ───────────────────────────────────────────────────────────
+
+  getNotificationSettings(): { email: string; events: Record<NotificationEvent, boolean>; digest: 'off' | 'weekly' } {
+    return { ...this.notificationSettings, events: { ...this.notificationSettings.events } };
+  }
+
+  updateNotificationSettings(update: { events?: Partial<Record<NotificationEvent, boolean>>; digest?: 'off' | 'weekly' }): { email: string; events: Record<NotificationEvent, boolean>; digest: 'off' | 'weekly' } {
+    if (update.events) {
+      this.notificationSettings.events = { ...this.notificationSettings.events, ...update.events } as Record<NotificationEvent, boolean>;
+    }
+    if (update.digest !== undefined) {
+      this.notificationSettings.digest = update.digest;
+    }
+    return this.getNotificationSettings();
+  }
+
+  // ── Git ─────────────────────────────────────────────────────────────────────
+
+  gitConnected = true;
+  gitAccount: string | null = 'princeion';
+
+  getGitInstallations(): { id: number; account: string; type: 'user' | 'organization'; repositorySelection: 'all' | 'selected'; repositories: number; installedAt: string; settingsUrl: string }[] {
+    return [
+      {
+        id: 1,
+        account: this.gitAccount ?? '',
+        type: 'user',
+        repositorySelection: 'all',
+        repositories: this.repositories.size,
+        installedAt: new Date().toISOString(),
+        settingsUrl: 'https://github.com/settings/installations/1',
+      },
+    ];
+  }
+
+  connectGit(): { url: string } {
+    this.gitConnected = true;
+    this.gitAccount = 'princeion';
+    return { url: '/dashboard/settings/git?connected=1' };
+  }
+
+  disconnectGit(): void {
+    this.gitConnected = false;
+    this.gitAccount = null;
   }
 }
 

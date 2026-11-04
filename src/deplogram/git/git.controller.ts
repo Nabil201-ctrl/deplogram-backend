@@ -1,8 +1,10 @@
 import {
   Controller,
+  Delete,
   Get,
   HttpCode,
   Param,
+  Post,
   Query,
 } from '@nestjs/common';
 
@@ -21,6 +23,7 @@ import {
   GitBranchDto,
   GitDetectionDto,
 } from './dto.js';
+import { GitInstallationDto, GitConnectionResultDto } from '../account/dto.js';
 
 /**
  * Simulated Git integration — the frontend uses these to connect a Git account,
@@ -38,6 +41,30 @@ export class GitController {
   @ApiResponse({ status: 200, description: 'Git connection info', type: GitConnectionDto })
   connection() {
     return this.store.getConnection();
+  }
+
+  @Post('connection')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Start connecting a Git account (returns the authorise URL)' })
+  @ApiResponse({ status: 200, description: 'Authorise URL', type: GitConnectionResultDto })
+  connect() {
+    return this.store.connectGit();
+  }
+
+  @Delete('connection')
+  @HttpCode(204)
+  @ApiOperation({ summary: 'Disconnect the connected Git account' })
+  @ApiResponse({ status: 204, description: 'Git account disconnected' })
+  disconnect() {
+    this.store.disconnectGit();
+  }
+
+  @Get('installations')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'List GitHub App installations for the connected account' })
+  @ApiResponse({ status: 200, description: 'Installations', type: [GitInstallationDto] })
+  installations() {
+    return { items: this.store.getGitInstallations() };
   }
 
   @Get('repositories')
