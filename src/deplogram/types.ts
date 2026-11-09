@@ -520,3 +520,92 @@ export interface RunLogs {
   /** null while running. */
   exitCode: number | null;
 }
+
+// ── Webhooks (workspace webhook tester) ─────────────────────────────────────────
+
+export interface WebhookRequest {
+  id: string;
+  method: string;
+  path: string;
+  /** `[[name, value], …]` — query string as sent. */
+  query: [string, string][];
+  /** `[[name, value], …]` — headers as sent. */
+  headers: [string, string][];
+  body: string;
+  contentType: string | null;
+  size: number;
+  ip: string;
+  receivedAt: string;
+}
+
+export interface WebhookEndpoint {
+  url: string;
+  createdAt: string;
+}
+
+export type WebhookSample = 'github-push' | 'paystack-charge' | 'form';
+
+// ── APIs (platform APIs: OTP, Email, Images, QR) ────────────────────────────────
+
+export type ApiId = 'otp' | 'email' | 'images' | 'qr';
+
+export const API_IDS: readonly ApiId[] = ['otp', 'email', 'images', 'qr'];
+
+export interface ApiKey {
+  id: string;
+  name: string;
+  prefix: string;
+  mode: 'live' | 'test';
+  /** Which APIs it may call; empty = all of them. */
+  access: ApiId[];
+  createdAt: string;
+  lastUsedAt: string | null;
+  createdBy: string;
+}
+
+export interface CreatedApiKey extends ApiKey {
+  /** The full secret, returned once at creation. */
+  secret: string;
+}
+
+export interface NewApiKey {
+  name: string;
+  mode: 'live' | 'test';
+  access: ApiId[];
+}
+
+export interface ApiRequest {
+  id: string;
+  api: ApiId;
+  method: 'GET' | 'POST';
+  path: string;
+  status: number;
+  durationMs: number;
+  keyPrefix: string;
+  mode: 'live' | 'test';
+  at: string;
+}
+
+export interface ApiUsage {
+  period: { start: string; end: string };
+  apis: {
+    id: ApiId;
+    used: number;
+    limit: number;
+    successRate: number;
+    p50Ms: number;
+    daily: { date: string; requests: number; errors: number }[];
+  }[];
+}
+
+export interface TryRequest {
+  method: 'GET' | 'POST';
+  path: string;
+  body?: Record<string, unknown>;
+}
+
+export interface TryResult {
+  status: number;
+  durationMs: number;
+  body: unknown;
+}

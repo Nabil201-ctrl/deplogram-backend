@@ -19,6 +19,16 @@ import { TrafficService } from './traffic/traffic.service.js';
 import { UsageController } from './usage/usage.controller.js';
 import { UsageService } from './usage/usage.service.js';
 import { WorkspaceController } from './workspace/workspace.controller.js';
+import { CodePadController } from './codepad/codepad.controller.js';
+import { CodePadService } from './codepad/codepad.service.js';
+import { RunsController } from './codepad/codepad.controller.js';
+import { StorageController } from './storage/storage.controller.js';
+import { StorageService } from './storage/storage.service.js';
+import { WebhooksController } from './webhooks/webhooks.controller.js';
+import { WebhooksService } from './webhooks/webhooks.service.js';
+import { ApisController } from './apis/apis.controller.js';
+import { ApisService } from './apis/apis.service.js';
+import { ApiKeysController } from './apis/apis.controller.js';
 
 /**
  * Everything the web frontend needs under `/v1/*` — the product's API.
@@ -41,6 +51,12 @@ import { WorkspaceController } from './workspace/workspace.controller.js';
     UsageController,
     ProjectsController,
     DeploymentController,
+    CodePadController,
+    RunsController,
+    StorageController,
+    WebhooksController,
+    ApisController,
+    ApiKeysController,
   ],
   providers: [
     AuthService,
@@ -49,6 +65,10 @@ import { WorkspaceController } from './workspace/workspace.controller.js';
     ProjectsService,
     TrafficService,
     UsageService,
+    CodePadService,
+    StorageService,
+    WebhooksService,
+    ApisService,
     DeplogramStore,
   ],
   exports: [DeplogramStore],

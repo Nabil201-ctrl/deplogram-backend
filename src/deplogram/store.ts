@@ -14,8 +14,14 @@ import {
   ActivityEvent,
   ActivityPage,
   ActivityType,
+  ApiId,
+  ApiKey,
+  ApiRequest,
+  ApiUsage,
+  API_IDS,
   BuildLogLine,
   BuildStepId,
+  CreatedApiKey,
   Deployment,
   DeploymentConfigSnapshot,
   DeploymentState,
@@ -25,18 +31,64 @@ import {
   GitConnection,
   GitDetection,
   GitRepository,
-  Pad,
+  NewApiKey,
   Project,
   ProjectEnvVar,
+  ProjectSummary,
   RuntimeLogLevel,
   RuntimeLogSource,
   RuntimeLogLine,
   StorageItem,
   TrafficPoint,
+  TryRequest,
   User,
   Viewer,
+  WebhookEndpoint,
+  WebhookRequest,
+  WebhookSample,
   Workspace,
 } from './types.js';
+
+// ── CodePad domain types (distinct from the backend Deployment "Pad") ───────────
+
+export interface CodePadFile {
+  path: string;
+  content: string;
+  updatedAt: string;
+}
+
+export interface CodePad {
+  id: string;
+  name: string;
+  runtime: string;
+  entry: string;
+  projectId: string | null;
+  updatedAt: string;
+  files: CodePadFile[];
+}
+
+export interface CodePadSummary {
+  id: string;
+  name: string;
+  runtime: string;
+  fileCount: number;
+  paths: string[];
+  updatedAt: string;
+  projectId: string | null;
+}
+
+export interface CodePadRunLogLine {
+  n: number;
+  at: string;
+  text: string;
+  stream: 'stdout' | 'stderr';
+}
+
+export interface CodePadRunLogs {
+  lines: CodePadRunLogLine[];
+  done: boolean;
+  exitCode: number | null;
+}
 import type { SecurityOverviewDto, SessionDto, TwoFactorSetupDto, NotificationEvent } from './account/dto.js';
 
 const MAX_REQUEST_LOG = 5000;
@@ -76,15 +128,24 @@ export class DeplogramStore {
   /** The workspace drive: path → item. Folders carry totals; files carry their bytes. */
   readonly storage = new Map<string, StorageItem>();
   /** Uploaded file contents: path → the bytes (for previews). */
-  private readonly storageContents = new Map<string, { bytes: ArrayBuffer | null; text: string | null }>();
+  private readonly storageContents = new Map<string, { bytes: ArrayBuffer | null; text: string | null; url: string | null }>();
   /** Public folder tokens: path → permanent base URL. */
   private readonly storagePublic = new Map<string, string>();
   /** Short-lived signed links: token → { path, expiresAt }. */
-  private readonly storageLinks = new Map<string, { path: string; expiresAt: number }>();
+  private readonly storageLinks = new Map<string, { path: string; size: number; contentType: string }>();
   /** CodePad pads: pad id → pad. */
-  readonly pads = new Map<string, Pad>();
-  /** CodePad runs: run id → run. */
-  private readonly runs = new Map<string, unknown>();
+  readonly pads = new Map<string, CodePad>();
+  /** CodePad runs: run id → run state. */
+  private readonly runs = new Map<string, { startedAt: number; script: { text: string; stream?: 'stdout' | 'stderr'; delay: number }[]; exitCode: number }>();
+
+  /** The webhook capture endpoint and the requests it has received. */
+  private webhookEndpoint: WebhookEndpoint | null = null;
+  private webhookRequests: WebhookRequest[] = [];
+  private webhookSeq = 0;
+
+  /** Platform API keys and the requests made against them. */
+  private apiKeys: ApiKey[] = [];
+  private apiRequests: ApiRequest[] = [];
 
   currentUser: User | null = null;
   connectedAccount: string | null = null;
@@ -348,6 +409,12 @@ export class DeplogramStore {
 
     // ── CodePad: a couple of starter pads so the editor has something to open ─────
     this.seedPads();
+
+    // ── Webhooks: a capture endpoint plus a few captured requests ─────────────────
+    this.seedWebhooks();
+
+    // ── APIs: a set of platform API keys ──────────────────────────────────────────
+    this.seedApiKeys();
   }
 
   private seedStorage(): void {
@@ -403,12 +470,10 @@ export class DeplogramStore {
 
   private seedPads(): void {
     const now = isoNow();
-    const nodePad: Pad = {
+    const nodePad: CodePad = {
       id: 'pad_node',
       name: 'hello-node',
       runtime: 'node',
-      fileCount: 2,
-      paths: ['server.js', 'package.json'],
       updatedAt: now,
       projectId: null,
       files: [
@@ -417,12 +482,10 @@ export class DeplogramStore {
       ],
       entry: 'server.js',
     };
-    const staticPad: Pad = {
+    const staticPad: CodePad = {
       id: 'pad_static',
       name: 'landing-page',
       runtime: 'static',
-      fileCount: 2,
-      paths: ['index.html', 'style.css'],
       updatedAt: now,
       projectId: null,
       files: [
@@ -433,6 +496,83 @@ export class DeplogramStore {
     };
     this.pads.set(nodePad.id, nodePad);
     this.pads.set(staticPad.id, staticPad);
+  }
+
+  private seedWebhooks(): void {
+    const token = () => Math.random().toString(36).slice(2, 10);
+    this.webhookEndpoint = {
+      url: `https://hooks.dpl.app/h/${token()}`,
+      createdAt: new Date(Date.now() - 3 * 86_400_000).toISOString(),
+    };
+    const now = new Date();
+    const sample = (kind: WebhookSample, at: Date): WebhookRequest => {
+      const id = `wh_${++this.webhookSeq}${token().slice(0, 4)}`;
+      const body =
+        kind === 'github-push'
+          ? JSON.stringify({
+              ref: 'refs/heads/main',
+              repository: { name: 'orders-api', full_name: 'ada-obi/orders-api', private: true },
+              head_commit: { id: '72c32b8', message: 'feat: add order filters', timestamp: at.toISOString() },
+            })
+          : kind === 'paystack-charge'
+            ? JSON.stringify({ event: 'charge.success', data: { id: 4127730154, amount: 4850000, currency: 'NGN' } })
+            : 'name=Funke+Adebayo&email=funke@example.com&plan=plus';
+      return {
+        id,
+        method: 'POST',
+        path: kind === 'form' ? '/signup' : '/',
+        query: kind === 'form' ? [['ref', 'newsletter']] : [],
+        headers: kind === 'form' ? [['content-type', 'application/x-www-form-urlencoded']] : [['content-type', 'application/json']],
+        body,
+        contentType: kind === 'form' ? 'application/x-www-form-urlencoded' : 'application/json',
+        size: body.length,
+        ip: '102.89.1.2',
+        receivedAt: at.toISOString(),
+      };
+    };
+    this.webhookRequests = [
+      sample('paystack-charge', new Date(now.getTime() - 4 * 60_000)),
+      sample('github-push', new Date(now.getTime() - 26 * 60_000)),
+      sample('form', new Date(now.getTime() - 3 * 3_600_000)),
+    ];
+  }
+
+  private seedApiKeys(): void {
+    const now = Date.now();
+    const ago = (days: number) => new Date(now - days * 86_400_000).toISOString();
+    const owner = this.currentUser;
+    this.apiKeys = [
+      {
+        id: 'key_1',
+        name: 'orders-api production',
+        prefix: 'dpl_live_3fk2',
+        mode: 'live',
+        access: [],
+        createdAt: ago(41),
+        lastUsedAt: new Date(now - 2 * 60_000).toISOString(),
+        createdBy: owner ? owner.name : 'you',
+      },
+      {
+        id: 'key_2',
+        name: 'Signup flow',
+        prefix: 'dpl_live_8qwm',
+        mode: 'live',
+        access: ['otp', 'email'],
+        createdAt: ago(18),
+        lastUsedAt: new Date(now - 3 * 86_400_000).toISOString(),
+        createdBy: owner ? owner.name : 'you',
+      },
+      {
+        id: 'key_3',
+        name: 'Local and CI',
+        prefix: 'dpl_test_9c1e',
+        mode: 'test',
+        access: [],
+        createdAt: ago(40),
+        lastUsedAt: new Date(now - 5 * 60 * 60_000).toISOString(),
+        createdBy: owner ? owner.name : 'you',
+      },
+    ];
   }
 
   /** Seed additional mock data mirroring the frontend mock API so the backend has
@@ -1402,6 +1542,566 @@ export class DeplogramStore {
     }
   }
 
+  // ── CodePad ───────────────────────────────────────────────────────────────────
+
+  listPads(): CodePadSummary[] {
+    return [...this.pads.values()]
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .map((pad) => ({
+        id: pad.id,
+        name: pad.name,
+        runtime: pad.runtime,
+        fileCount: pad.files.length,
+        paths: pad.files.map((f) => f.path),
+        updatedAt: pad.updatedAt,
+        projectId: pad.projectId,
+      }));
+  }
+
+  getPad(id: string): CodePad | undefined {
+    return this.pads.get(id);
+  }
+
+  createPad(name: string, template: 'static' | 'node' | 'python'): CodePad {
+    const runtime = template;
+    const entry = runtime === 'static' ? 'index.html' : runtime === 'node' ? 'index.js' : 'main.py';
+    const files: CodePadFile[] =
+      runtime === 'static'
+        ? [
+            { path: 'index.html', content: '<h1>Hello from CodePad</h1>\n', updatedAt: isoNow() },
+            { path: 'style.css', content: 'body { margin: 0; }\n', updatedAt: isoNow() },
+            { path: 'script.js', content: 'console.log("hello");\n', updatedAt: isoNow() },
+          ]
+        : runtime === 'node'
+          ? [
+              { path: 'index.js', content: 'console.log("hello from Node");\n', updatedAt: isoNow() },
+              { path: 'package.json', content: '{"name":"hello-node","version":"1.0.0"}\n', updatedAt: isoNow() },
+            ]
+          : [
+              { path: 'main.py', content: 'print("Hello from Python")\n', updatedAt: isoNow() },
+              { path: 'requirements.txt', content: '', updatedAt: isoNow() },
+            ];
+    const pad: CodePad = {
+      id: newId('pad'),
+      name,
+      runtime,
+      entry,
+      projectId: null,
+      updatedAt: isoNow(),
+      files,
+    };
+    this.pads.set(pad.id, pad);
+    return pad;
+  }
+
+  updatePad(id: string, name: string): CodePad | undefined {
+    const pad = this.pads.get(id);
+    if (!pad) return undefined;
+    pad.name = name;
+    pad.updatedAt = isoNow();
+    return pad;
+  }
+
+  deletePad(id: string): boolean {
+    return this.pads.delete(id);
+  }
+
+  savePadFile(id: string, path: string, content: string): CodePadFile | undefined {
+    const pad = this.pads.get(id);
+    if (!pad) return undefined;
+    const saved: CodePadFile = { path, content, updatedAt: isoNow() };
+    const at = pad.files.findIndex((f) => f.path === path);
+    if (at >= 0) pad.files[at] = saved;
+    else pad.files.push(saved);
+    pad.files.sort((a, b) => a.path.localeCompare(b.path));
+    pad.updatedAt = saved.updatedAt;
+    return saved;
+  }
+
+  renamePadFile(id: string, from: string, to: string): CodePad | 'exists' | undefined {
+    const pad = this.pads.get(id);
+    if (!pad) return undefined;
+    if (pad.files.some((f) => f.path === to)) return 'exists';
+    const file = pad.files.find((f) => f.path === from);
+    if (!file) return undefined;
+    file.path = to;
+    if (pad.entry === from) pad.entry = to;
+    pad.files.sort((a, b) => a.path.localeCompare(b.path));
+    pad.updatedAt = isoNow();
+    return pad;
+  }
+
+  deletePadFile(id: string, path: string): CodePad | undefined {
+    const pad = this.pads.get(id);
+    if (!pad) return undefined;
+    pad.files = pad.files.filter((f) => f.path !== path);
+    if (pad.entry === path) pad.entry = pad.files[0]?.path ?? '';
+    pad.updatedAt = isoNow();
+    return pad;
+  }
+
+  startPadRun(id: string): string | undefined {
+    const pad = this.pads.get(id);
+    if (!pad) return undefined;
+    const runId = newId('run');
+    const script = padScript(pad);
+    this.runs.set(runId, { startedAt: Date.now(), script, exitCode: 0 });
+    return runId;
+  }
+
+  getRunLogs(id: string, after: number): { lines: CodePadRunLogLine[]; done: boolean; exitCode: number | null } | undefined {
+    const run = this.runs.get(id);
+    if (!run) return undefined;
+    const elapsed = Date.now() - run.startedAt;
+    let t = 0;
+    const due = run.script.flatMap((line, i) => {
+      t += line.delay;
+      return t <= elapsed ? [{ n: i + 1, at: new Date(run.startedAt + t).toISOString(), text: line.text, stream: line.stream ?? 'stdout' }] : [];
+    });
+    const done = due.length === run.script.length;
+    return {
+      lines: done ? due.filter((l) => l.n > after) : due.filter((l) => l.n > after),
+      done,
+      exitCode: done ? run.exitCode : null,
+    };
+  }
+
+  /** Deploy a pad: first time it becomes a project; after that it redeploys that project. */
+  deployPad(id: string): { project: ProjectSummary; deployment: Deployment } | undefined {
+    const pad = this.pads.get(id);
+    if (!pad) return undefined;
+
+    if (pad.projectId) {
+      const project = this.projects.get(pad.projectId);
+      if (!project) return undefined;
+      const latest = this.latestDeployment(pad.projectId);
+      if (!latest) return undefined;
+      const fresh = this.createDeployment(pad.projectId, {
+        trigger: 'manual',
+        commitSha: Math.random().toString(16).slice(2, 9),
+        commitMessage: 'Deployed from CodePad',
+        author: { name: 'You', avatarUrl: null },
+      });
+      return { project: this.summarizePadProject(project), deployment: fresh };
+    }
+
+    const repoId = `codepad_${pad.name}`;
+    if (!this.repositories.has(repoId)) {
+      this.repositories.set(repoId, {
+        id: repoId,
+        fullName: `codepad/${pad.name}`,
+        private: true,
+        defaultBranch: 'codepad',
+        updatedAt: isoNow(),
+        projectId: null,
+      });
+    }
+    const config: ProjectConfigInput = {
+      buildCommand: null,
+      startCommand: pad.runtime === 'static' ? null : pad.runtime === 'node' ? `node ${pad.entry}` : `python ${pad.entry}`,
+      port: pad.runtime === 'static' ? null : pad.runtime === 'node' ? 3000 : 8000,
+      rootDirectory: null,
+    };
+    const project = this.createProject(
+      {
+        name: pad.name,
+        repositoryId: repoId,
+        branch: 'codepad',
+        runtime: pad.runtime,
+        config,
+        env: [],
+      },
+      newId('proj'),
+    );
+    const repo = this.repositories.get(repoId);
+    if (repo) repo.projectId = project.id;
+    const deployment = this.createDeployment(project.id, {
+      trigger: 'manual',
+      commitSha: Math.random().toString(16).slice(2, 9),
+      commitMessage: 'Deployed from CodePad',
+      author: { name: 'You', avatarUrl: null },
+    });
+    this.pads.get(id)!.projectId = project.id;
+    return { project: this.summarizePadProject(project), deployment };
+  }
+
+  private summarizePadProject(project: Project): ProjectSummary {
+    const deployments = this.deploymentsOfProject(project.id);
+    const latest = deployments[0];
+    const state: DeploymentState = latest ? latest.state : 'QUEUED';
+    return {
+      id: project.id,
+      name: project.name,
+      runtime: project.runtime,
+      state,
+      url: state === 'RUNNING' && latest ? this.urlOf(project.name) : null,
+      repository: project.repository,
+      branch: project.branch,
+      updatedAt: project.updatedAt,
+      latest: latest
+        ? {
+            id: latest.id,
+            state: latest.state,
+            live: latest.live,
+            sha: latest.commit.sha,
+            message: latest.commit.message,
+            createdAt: latest.createdAt,
+          }
+        : null,
+      recent: deployments.slice(0, 10).map((deployment) => deployment.state),
+    };
+  }
+
+  // ── Storage ───────────────────────────────────────────────────────────────────
+
+  getStorageList(path: string): { path: string; items: StorageItem[]; public: boolean; publicFrom: string | null } | undefined {
+    if (!this.storageExists(path)) return undefined;
+    const from = this.storagePublicFrom(path);
+    const items = [...this.storage.values()]
+      .filter((item) => this.storageParentOf(item.path) === path)
+      .map((item) => this.storageView(item));
+    return { path, items, public: from != null, publicFrom: from };
+  }
+
+  searchStorage(q: string): StorageItem[] {
+    const needle = q.toLowerCase();
+    return [...this.storage.values()]
+      .filter((item) => item.name.toLowerCase().includes(needle))
+      .slice(0, 50)
+      .map((item) => this.storageView(item));
+  }
+
+  getStorageFolders(): string[] {
+    return [...this.storage.values()].filter((i) => i.kind === 'folder').map((i) => i.path).sort();
+  }
+
+  createStorageFolder(path: string): StorageItem | 'exists' | 'no-parent' {
+    if (this.storage.has(path)) return 'exists';
+    if (!this.storageExists(this.storageParentOf(path))) return 'no-parent';
+    const now = new Date().toISOString();
+    const folder: StorageItem = {
+      kind: 'folder',
+      name: path.split('/').pop()!,
+      path,
+      size: 0,
+      contentType: null,
+      items: 0,
+      createdAt: now,
+      updatedAt: now,
+      thumbnailUrl: null,
+      public: false,
+      publicUrl: null,
+    };
+    this.storage.set(path, folder);
+    return this.storageView(folder);
+  }
+
+  completeStorageUpload(token: string, bytes: ArrayBuffer | null): StorageItem | undefined {
+    const upload = this.storageLinks.get(token);
+    if (!upload) return undefined;
+    const { path, size, contentType } = upload;
+    this.storageLinks.delete(token);
+    return this.addStorageFile(path, size, contentType, bytes);
+  }
+
+  createStorageUpload(path: string, size: number, contentType: string): { uploadUrl: string } | undefined {
+    const limit = this.storageUsedBytes();
+    // The free plan storage limit is 256 MB.
+    if (limit + size > 256 * 1024 * 1024) return undefined;
+    const token = newId('upt');
+    this.storageLinks.set(token, { path, size, contentType });
+    return { uploadUrl: `/v1/storage/uploads/${token}` };
+  }
+
+  renameStorageItem(path: string, name: string, makePublic?: boolean): StorageItem | null | 'exists' | 'missing' {
+    if (makePublic !== undefined) {
+      const item = this.storage.get(path);
+      if (!item || item.kind !== 'folder') return null;
+      this.storage.set(path, { ...item, public: makePublic, updatedAt: new Date().toISOString() });
+      return this.storageView(this.storage.get(path)!);
+    }
+    if (!name) return 'missing';
+    const item = this.storage.get(path);
+    if (!item) return 'missing';
+    const parent = this.storageParentOf(path);
+    const to = parent ? `${parent}/${name}` : name;
+    if (to !== path && this.storage.has(to)) return 'exists';
+    this.storageRelocate(path, to);
+    return this.storageView(this.storage.get(to)!);
+  }
+
+  moveStorageItems(paths: string[], to: string): number | 'bad-target' {
+    if (!this.storageExists(to)) return 'bad-target';
+    if (paths.some((p) => to === p || to.startsWith(`${p}/`))) return 'bad-target';
+    let moved = 0;
+    for (const path of paths) {
+      const item = this.storage.get(path);
+      if (!item || this.storageParentOf(path) === to) continue;
+      const taken = new Set(this.getStorageList(to)!.items.map((i) => i.name));
+      let name = item.name;
+      for (let n = 1; taken.has(name); n += 1) name = `${item.name} (${n})`;
+      this.storageRelocate(path, to ? `${to}/${name}` : name);
+      moved += 1;
+    }
+    return moved;
+  }
+
+  deleteStorageItems(paths: string[]): { deleted: number; freed: number } {
+    let freed = 0;
+    let deleted = 0;
+    for (const path of paths) {
+      for (const [key, item] of [...this.storage]) {
+        if (key === path || key.startsWith(`${path}/`)) {
+          if (item.kind === 'file') freed += item.size;
+          this.storage.delete(key);
+          this.storageContents.delete(key);
+          if (key === path) deleted += 1;
+        }
+      }
+    }
+    return { deleted, freed };
+  }
+
+  previewStorage(path: string): { url: string | null; text: string | null; truncated: boolean } | undefined {
+    const item = this.storage.get(path);
+    if (!item || item.kind !== 'file') return undefined;
+    const uploaded = this.storageContents.get(path);
+    const isTextLike = this.storageItemIsTextLike(item);
+    if (isTextLike) {
+      const text = uploaded?.text ?? null;
+      const limit = 200_000;
+      return {
+        url: null,
+        text: text && text.length > limit ? text.slice(0, limit) : text,
+        truncated: Boolean(text && text.length > limit),
+      };
+    }
+    return { url: uploaded?.url ?? item.thumbnailUrl ?? null, text: null, truncated: false };
+  }
+
+  createStorageLink(path: string, expiresIn: '1h' | '1d' | '7d'): { url: string; expiresAt: string } | undefined {
+    if (!this.storage.get(path)) return undefined;
+    const ms = { '1h': 3_600_000, '1d': 86_400_000, '7d': 7 * 86_400_000 }[expiresIn];
+    const token = newId('lnk');
+    this.storagePublic.set(path, `https://files.dpl.app/${encodeURI(path)}?token=${token}`);
+    return {
+      url: `https://files.dpl.app/${encodeURI(path)}?token=${token}`,
+      expiresAt: new Date(Date.now() + ms).toISOString(),
+    };
+  }
+
+  // ── storage helpers ───────────────────────────────────────────────────────────
+
+  private storageExists(path: string): boolean {
+    return path === '' || this.storage.get(path)?.kind === 'folder';
+  }
+
+  private storagePublicFrom(path: string): string | null {
+    for (let p = path; p; p = this.storageParentOf(p)) {
+      const item = this.storage.get(p);
+      if (item?.kind === 'folder' && item.public) return p;
+    }
+    return null;
+  }
+
+  private storageParentOf(path: string): string {
+    return path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+  }
+
+  private storageView(item: StorageItem): StorageItem {
+    const pub = this.storagePublicFrom(item.path) != null;
+    if (item.kind === 'file') return { ...item, public: pub, publicUrl: pub ? `https://files.dpl.app/ada/${encodeURI(item.path)}` : null };
+    const prefix = `${item.path}/`;
+    let size = 0;
+    let children = 0;
+    for (const other of this.storage.values()) {
+      if (!other.path.startsWith(prefix)) continue;
+      if (other.kind === 'file') size += other.size;
+      if (this.storageParentOf(other.path) === item.path) children += 1;
+    }
+    return { ...item, size, items: children, public: pub, publicUrl: null };
+  }
+
+  private addStorageFile(path: string, size: number, contentType: string, bytes: ArrayBuffer | null): StorageItem {
+    const folder = this.storageParentOf(path);
+    const taken = new Set(this.getStorageList(folder)!.items.map((i) => i.name));
+    let name = path.split('/').pop()!;
+    if (taken.has(name)) {
+      const dot = name.lastIndexOf('.');
+      const [base, ext] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ''];
+      let n = 1;
+      while (taken.has(`${base} (${n})${ext}`)) n += 1;
+      name = `${base} (${n})${ext}`;
+    }
+    const full = folder ? `${folder}/${name}` : name;
+    const now = new Date().toISOString();
+    const blobUrl = bytes ? URL.createObjectURL(new Blob([bytes], { type: contentType })) : null;
+    const file: StorageItem = {
+      kind: 'file',
+      name,
+      path: full,
+      size,
+      contentType,
+      items: null,
+      createdAt: now,
+      updatedAt: now,
+      thumbnailUrl: contentType.startsWith('image/') ? (blobUrl ?? null) : null,
+      public: false,
+      publicUrl: null,
+    };
+    this.storage.set(full, file);
+    if (blobUrl) {
+      const text = this.storageItemIsTextLike(file) && bytes && bytes.byteLength < 2_000_000 ? new TextDecoder().decode(bytes) : null;
+      this.storageContents.set(full, { bytes, text, url: blobUrl ?? null });
+    }
+    return this.storageView(file);
+  }
+
+  private storageItemIsTextLike(item: StorageItem): boolean {
+    const type = item.contentType ?? '';
+    const ext = item.name.split('.').pop()?.toLowerCase() ?? '';
+    return (
+      type.startsWith('text/') ||
+      /json|xml|javascript|yaml/.test(type) ||
+      ['md', 'txt', 'csv', 'json', 'js', 'ts', 'py', 'html', 'css', 'sql', 'yml', 'yaml', 'env'].includes(ext)
+    );
+  }
+
+  private storageUsedBytes(): number {
+    let bytes = 0;
+    for (const item of this.storage.values()) {
+      if (item.kind === 'file') bytes += item.size;
+    }
+    return bytes;
+  }
+
+  private storageRelocate(from: string, to: string) {
+    const now = new Date().toISOString();
+    for (const [key, item] of [...this.storage]) {
+      if (key !== from && !key.startsWith(`${from}/`)) continue;
+      const next = to + key.slice(from.length);
+      this.storage.delete(key);
+      this.storage.set(next, { ...item, path: next, name: next.split('/').pop()!, updatedAt: key === from ? now : item.updatedAt });
+      const content = this.storageContents.get(key);
+      if (content) {
+        this.storageContents.delete(key);
+        this.storageContents.set(next, content);
+      }
+    }
+  }
+
+  // ── Webhooks ──────────────────────────────────────────────────────────────────
+
+  getWebhookEndpoint(): WebhookEndpoint | null {
+    return this.webhookEndpoint;
+  }
+
+  rotateWebhookEndpoint(): WebhookEndpoint {
+    const token = () => Math.random().toString(36).slice(2, 10);
+    this.webhookEndpoint = { url: `https://hooks.dpl.app/h/${token()}`, createdAt: new Date().toISOString() };
+    this.webhookRequests = [];
+    return this.webhookEndpoint;
+  }
+
+  listWebhookRequests(): WebhookRequest[] {
+    return this.webhookRequests.slice(0, 50);
+  }
+
+  clearWebhookRequests(): void {
+    this.webhookRequests = [];
+  }
+
+  captureWebhookRequest(request: Omit<WebhookRequest, 'id' | 'receivedAt'>): WebhookRequest {
+    const id = `wh_${++this.webhookSeq}${Math.random().toString(36).slice(2, 4)}`;
+    const entry: WebhookRequest = { ...request, id, receivedAt: new Date().toISOString() };
+    this.webhookRequests = [entry, ...this.webhookRequests];
+    return entry;
+  }
+
+  getWebhookRequest(id: string): WebhookRequest | undefined {
+    return this.webhookRequests.find((r) => r.id === id);
+  }
+
+  // ── APIs ──────────────────────────────────────────────────────────────────────
+
+  listApiKeys(): ApiKey[] {
+    return [...this.apiKeys];
+  }
+
+  createApiKey(input: NewApiKey): CreatedApiKey {
+    const secret = `dpl_${input.mode}_${Math.random().toString(16).slice(2, 42)}`;
+    const key: ApiKey = {
+      id: newId('key'),
+      name: input.name,
+      prefix: secret.slice(0, 13),
+      mode: input.mode,
+      access: input.access,
+      createdAt: new Date().toISOString(),
+      lastUsedAt: null,
+      createdBy: this.currentUser ? this.currentUser.name : 'you',
+    };
+    this.apiKeys = [key, ...this.apiKeys];
+    return { ...key, secret };
+  }
+
+  revokeApiKey(id: string): boolean {
+    const found = this.apiKeys.some((k) => k.id === id);
+    this.apiKeys = this.apiKeys.filter((k) => k.id !== id);
+    return found;
+  }
+
+  getApiUsage(): ApiUsage {
+    const now = new Date();
+    const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0));
+    const plan: Record<string, { limit: number; perDay: number; p50: number; errors: number }> = {
+      otp: { limit: 500, perDay: 12, p50: 412, errors: 0.012 },
+      email: { limit: 3_000, perDay: 70, p50: 186, errors: 0.004 },
+      images: { limit: 5_000, perDay: 162, p50: 238, errors: 0.006 },
+      qr: { limit: 10_000, perDay: 80, p50: 41, errors: 0.001 },
+    };
+    const apis = API_IDS.map((id) => {
+      const daily = Array.from({ length: 30 }, (_, i) => {
+        const date = new Date(now.getTime() - (29 - i) * 86_400_000);
+        const requests = Math.round(plan[id].perDay * (0.8 + i / 100));
+        return { date: date.toISOString().slice(0, 10), requests, errors: Math.round(requests * plan[id].errors) };
+      });
+      const used = daily.reduce((sum, d) => sum + d.requests, 0);
+      return { id, used, limit: plan[id].limit, successRate: 1 - plan[id].errors, p50Ms: plan[id].p50, daily };
+    });
+    return { period: { start: start.toISOString(), end: end.toISOString() }, apis };
+  }
+
+  listApiRequests(api?: ApiId): ApiRequest[] {
+    return (api ? this.apiRequests.filter((r) => r.api === api) : this.apiRequests).slice(0, 50);
+  }
+
+  tryApi(request: TryRequest): { status: number; durationMs: number; body: unknown } {
+    const started = Date.now();
+    const api = this.apiOfPath(request.path);
+    const status = api ? 200 : 404;
+    const body = api ? { id: `t_${Math.random().toString(16).slice(2, 10)}`, ok: true } : { error: { code: 'not_found', message: `No endpoint ${request.method} ${request.path}.` } };
+    const durationMs = Math.max(1, Date.now() - started);
+    const entry: ApiRequest = {
+      id: `req_${Math.random().toString(16).slice(2, 10)}`,
+      api: api ?? 'otp',
+      method: request.method,
+      path: request.path,
+      status,
+      durationMs,
+      keyPrefix: 'dpl_test_9c1e',
+      mode: 'test',
+      at: new Date().toISOString(),
+    };
+    this.apiRequests = [entry, ...this.apiRequests].slice(0, 200);
+    return { status, durationMs, body };
+  }
+
+  private apiOfPath(path: string): ApiId | undefined {
+    const segment = path.split('/')[2];
+    return API_IDS.includes(segment as ApiId) ? (segment as ApiId) : undefined;
+  }
+
   // ── Security ────────────────────────────────────────────────────────────────
 
   getSecurityOverview(_userId: string): SecurityOverviewDto {
@@ -1540,4 +2240,30 @@ export class DeplogramStore {
 
 function daysAgo(days: number): string {
   return new Date(Date.now() - days * 86_400_000).toISOString();
+}
+
+/** A deterministic script for running a pad, mirroring the CodePad mock. */
+function padScript(pad: CodePad): { text: string; stream?: 'stdout' | 'stderr'; delay: number }[] {
+  if (pad.runtime === 'static') {
+    return [
+      { text: `$ serve . (${pad.files.length} files)`, delay: 150 },
+      { text: `Serving ${pad.entry} with ${pad.files.filter((f) => f.path.endsWith('.css')).length} stylesheet(s) and ${pad.files.filter((f) => f.path.endsWith('.js')).length} script(s)`, delay: 350 },
+      { text: "Preview is live in the panel on the right.", delay: 150 },
+    ];
+  }
+  if (pad.runtime === 'python') {
+    const names = pad.files.find((f) => f.path === pad.entry)?.content.match(/\["([^\]]+)"\]/)?.[1]?.split(/",\s*"/) ?? [];
+    const day = new Date().toLocaleDateString('en-GB', { weekday: 'long' });
+    return [
+      { text: `$ python ${pad.entry}`, delay: 200 },
+      ...(names.length ? names.map((n, i) => ({ text: `Hello, ${n}! Today is ${day}.`, delay: i === 0 ? 600 : 80 })) : [{ text: '(no output)', delay: 600 }]),
+      { text: 'Process finished with exit code 0', delay: 120 },
+    ];
+  }
+  return [
+    { text: `$ node ${pad.entry}`, delay: 200 },
+    { text: 'Listening on http://localhost:3000', delay: 700 },
+    { text: 'GET / 200 3ms', delay: 900 },
+    { text: 'Run ended — runs in CodePad are short and time-limited.', delay: 1200 },
+  ];
 }

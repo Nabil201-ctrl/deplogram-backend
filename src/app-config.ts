@@ -43,6 +43,11 @@ export function configureApp(app: INestApplication): void {
     .addTag('deployments', 'Deployment list, detail, build logs, redeploy and rollback')
     .addTag('git', 'Git connection, repositories, branches and runtime detection')
     .addTag('activity', 'Audit / activity feed')
+    .addTag('codepad', 'CodePad pads, runs and deploys')
+    .addTag('storage', 'Workspace drive: folders, files, uploads, previews and links')
+    .addTag('webhooks', 'Webhook capture endpoint and requests')
+    .addTag('apis', 'Platform APIs: usage, requests and try')
+    .addTag('api-keys', 'Platform API keys')
     .addServer('http://localhost:3000', 'Local development')
     .addServer(
       'https://deplogram-backend.vercel.app',
