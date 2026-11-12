@@ -571,8 +571,8 @@ Status legend (used for every endpoint and module in this document)
   /api/docs-json -> OpenAPI 3.0.0 document (generated at boot from the controllers)
   Servers listed: http://localhost:3000 (Local development) and
                   https://deplogram-backend.vercel.app (Production)
-  Note: the document is generated automatically, so every route above appears - but
-        request bodies are not always typed (no DTOs), so some schemas are empty.
+Note: the document is generated automatically, so every route above appears - but
+request bodies are not always typed (no DTOs), so some schemas are empty.
 
 --------------------------------------------------------------------------------
 3. AUTHENTICATION AND AUTHORIZATION
@@ -971,9 +971,14 @@ Status legend (used for every endpoint and module in this document)
   No coverage thresholds are configured.
 
 8.2 API collections / generated artifacts
+  - `openapi.json` — committed OpenAPI 3.0.0 snapshot of the full `/v1/*` API
+    (plus legacy `/auth/*`, `/email/*`, `/utils/*` routes), generated from the
+    NestJS controllers via `SwaggerModule.createDocument` in `src/app-config.ts`.
+    Regenerate with `npx tsx scripts/generate-openapi.ts` (builds to `dist/`,
+    which is gitignored).
+  - The live OpenAPI document is also served at `/api/docs-json` (UI at
+    `/api/docs`) on every running instance.
   - No Postman/Insomnia/HTTP collection is committed.
-  - The live OpenAPI document (/api/docs-json) is the machine-readable contract; it is
-    generated at boot, not committed. Consider committing an openapi.json snapshot.
 
 8.3 Setup instructions
   Local
