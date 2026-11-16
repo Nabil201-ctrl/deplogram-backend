@@ -1,7 +1,6 @@
 import { ConflictException, Injectable } from '@nestjs/common';
 
-import { DeplogramStore } from '../store.js';
-import { DeploymentService } from '../deployments/deployments.service.js';
+import { DatabaseService } from '../database/database.service.js';
 import {
   Deployment,
   DeploymentState,
@@ -18,27 +17,24 @@ const METRICS_RANGES: readonly MetricsRange[] = ['1h', '24h', '7d'];
 
 @Injectable()
 export class ProjectsService {
-  constructor(
-    private readonly store: DeplogramStore,
-    private readonly deployments: DeploymentService,
-  ) {}
+  constructor(private readonly db: DatabaseService) {}
 
   // ── projects ─────────────────────────────────────────────────────────────────
 
-  listProjects(): ProjectSummary[] {
+  async listProjects(userId: string): Promise<ProjectSummary[]> {
+    const workspace = await this.db.currentWorkspace(userId);
     const summaries: ProjectSummary[] = [];
-    for (const project of this.store.listProjects()) {
-      summaries.push(this.summarize(project, false));
+    for (const project of await this.db.listProjects(workspace.id)) {
+      summaries.push(await this.summarize(project, false));
     }
     return summaries;
   }
 
-  getProject(id: string): Project | undefined {
-    const project = this.store.getProject(id);
-    return project ? (this.summarize(project, true) as Project) : undefined;
+  async getProject(id: string): Promise<Project | undefined> {
+    return this.db.getProject(id);
   }
 
-  createProject(input: {
+  async createProject(userId: string, input: {
     name: string;
     repositoryId: string;
     branch: string;
@@ -50,82 +46,72 @@ export class ProjectsService {
       rootDirectory: string | null;
     };
     env: { key: string; value: string }[];
-  }): { project: ProjectSummary; deployment: Deployment } {
-    for (const existing of this.store.listProjects()) {
-      if (existing.name === input.name) {
-        throw new ConflictException('That project name is already taken.');
-      }
-    }
-    const project = this.store.createProject(input);
-    const deployment = this.store.createDeployment(project.id, {
+  }): Promise<{ project: ProjectSummary; deployment: Deployment }> {
+    const project = await this.db.createProject(userId, input);
+    const deployment = await this.db.createDeployment(project.id, {
       trigger: 'git',
       commitSha: randomSha(),
       commitMessage: `deploy ${project.name}`,
       author: { name: 'Ada Lovelace', avatarUrl: null },
     });
-    this.deployments.startBuild(deployment.id);
-    return { project: this.summarize(project, false), deployment };
+    return { project: await this.summarize(project, false), deployment };
   }
 
-  updateProject(id: string, update: ProjectUpdate): Project | undefined {
-    const project = this.store.updateProject(id, {
+  async updateProject(id: string, update: ProjectUpdate): Promise<Project | undefined> {
+    return this.db.updateProject(id, {
       name: update.name,
       branch: update.branch,
       config: update.config,
     });
-    return project ? (this.summarize(project, true) as Project) : undefined;
   }
 
-  deleteProject(id: string): void {
-    this.store.deleteProject(id);
+  async deleteProject(id: string): Promise<void> {
+    await this.db.deleteProject(id);
   }
 
-  /** Is the name (and therefore the URL) still free? */
-  checkNameAvailability(name: string): {
+  /** Is the name (and therefore the URL) still free within the user's workspace? */
+  async checkNameAvailability(userId: string, name: string): Promise<{
     available: boolean;
     url: string;
     suggestion: string | null;
-  } {
-    for (const project of this.store.listProjects()) {
+  }> {
+    const workspace = await this.db.currentWorkspace(userId);
+    for (const project of await this.db.listProjects(workspace.id)) {
       if (project.name === name) {
-        return {
-          available: false,
-          url: this.store.urlOf(name),
-          suggestion: null,
-        };
+        return { available: false, url: `${name}.deplogram.app`, suggestion: null };
       }
     }
-    return { available: true, url: this.store.urlOf(name), suggestion: null };
+    return { available: true, url: `${name}.deplogram.app`, suggestion: null };
   }
 
   // ── environment variables ────────────────────────────────────────────────────
 
-  getEnvVars(id: string): EnvVarRecord[] {
-    return this.store.getEnvVars(id);
+  async getEnvVars(id: string): Promise<EnvVarRecord[]> {
+    return this.db.getEnvVars(id);
   }
 
-  saveEnvVars(
+  async saveEnvVars(
     id: string,
     values: { key: string; value: string | null }[],
-  ): EnvVarRecord[] {
-    return this.store.saveEnvVars(id, values);
+  ): Promise<EnvVarRecord[]> {
+    return this.db.saveEnvVars(id, values);
   }
 
   // ── runtime logs ─────────────────────────────────────────────────────────────
 
-  getRuntimeLogs(projectId: string, after: number): RuntimeLogs {
-    const project = this.store.getProject(projectId);
+  async getRuntimeLogs(projectId: string, after: number): Promise<RuntimeLogs> {
+    const project = await this.db.getProject(projectId);
     if (!project) throw new Error('Unknown project');
-    const deployment =
-      this.liveDeploymentOf(projectId) ?? this.latestDeploymentOf(projectId);
-    const { lines } = this.store.getRuntimeLog(deployment.id, after);
+    const deployment = await this.db.latestDeployment(projectId);
+    if (!deployment) throw new Error('Unknown deployment');
+    const { lines } = await this.db.getRuntimeLog(deployment.id, after);
     return { lines, live: deployment.live };
   }
 
   // ── metrics ──────────────────────────────────────────────────────────────────
 
-  getMetrics(projectId: string, range: string): Metrics {
-    const project = this.store.getProject(projectId);
+  async getMetrics(projectId: string, range: string): Promise<Metrics> {
+    const project = await this.db.getProject(projectId);
     if (!project) throw new Error('Unknown project');
     const metricsRange: MetricsRange = METRICS_RANGES.includes(
       range as MetricsRange,
@@ -133,11 +119,12 @@ export class ProjectsService {
       ? (range as MetricsRange)
       : '24h';
     const start = startOfRange(metricsRange);
-    const periodRequests = this.store
-      .getRequests()
+    const periodRequests = (await this.db.getRequests())
       .filter(
         (point) =>
-          Date.parse(point.at) >= start && Date.parse(point.at) < Date.now(),
+          point.projectId === projectId &&
+          Date.parse(point.at) >= start &&
+          Date.parse(point.at) < Date.now(),
       );
 
     const { summary, series, statuses, paths, memoryLimit } = this.aggregate(
@@ -156,15 +143,11 @@ export class ProjectsService {
 
   // ── helpers ──────────────────────────────────────────────────────────────────
 
-  private summarize(
-    project: Project,
-    withConfig: boolean,
-  ): ProjectSummary | Project {
-    const deployments = this.store.deploymentsOfProject(project.id);
+  private async summarize(project: Project, withConfig: boolean): Promise<ProjectSummary | Project> {
+    const deployments = await this.db.deploymentsOfProject(project.id);
     const latest = deployments[0];
     const state: DeploymentState = latest ? latest.state : 'QUEUED';
-    const url =
-      state === 'RUNNING' && latest ? this.store.urlOf(project.name) : null;
+    const url = state === 'RUNNING' && latest ? project.url : null;
     const summary: ProjectSummary = {
       id: project.id,
       name: project.name,
@@ -195,16 +178,6 @@ export class ProjectsService {
       config: project.config,
       env: project.env,
     };
-  }
-
-  private liveDeploymentOf(projectId: string) {
-    const deployments = this.store.deploymentsOfProject(projectId);
-    return deployments.find((deployment) => deployment.live);
-  }
-
-  private latestDeploymentOf(projectId: string) {
-    const deployments = this.store.deploymentsOfProject(projectId);
-    return deployments[0];
   }
 
   private aggregate(
@@ -239,10 +212,7 @@ export class ProjectsService {
     const perPath = new Map<string, { requests: number; p95sum: number[] }>();
     for (const request of requests) {
       const at = new Date(request.at).getTime();
-      const index = Math.min(
-        Math.floor((at - start) / bucketSize),
-        bucketCount - 1,
-      );
+      const index = Math.min(Math.floor((at - start) / bucketSize), bucketCount - 1);
       const point = series[index];
       point.requests += 1;
       if (request.error) {
@@ -317,10 +287,7 @@ function startOfRange(range: MetricsRange): number {
 function percentile(values: number[], percent: number): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
-  const index = Math.min(
-    Math.floor((percent / 100) * sorted.length),
-    sorted.length - 1,
-  );
+  const index = Math.min(Math.floor((percent / 100) * sorted.length), sorted.length - 1);
   return sorted[index];
 }
 

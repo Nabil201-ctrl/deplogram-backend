@@ -1,50 +1,32 @@
-import {
-  Controller,
-  Get,
-  HttpCode,
-} from '@nestjs/common';
+import { Controller, Get, HttpCode, Req } from '@nestjs/common';
+import type { Request } from 'express';
 
-import { DeplogramStore } from '../store.js';
-import type { Traffic, TrafficPoint } from '../types.js';
+import { TrafficService } from './traffic.service.js';
+import type { Traffic } from '../types.js';
 import {
   ApiTags,
   ApiOperation,
   ApiResponse,
+  ApiCookieAuth,
 } from '@nestjs/swagger';
 import { TrafficDto } from './dto.js';
-
-const RECENT_WINDOW_MS = 65 * 1000;
+import { requireUser } from '../auth/require-auth.js';
 
 @ApiTags('traffic')
+@ApiCookieAuth('deplogram_session')
 @Controller('v1/traffic')
 export class TrafficController {
-  constructor(private readonly store: DeplogramStore) {}
+  constructor(private readonly traffic: TrafficService) {}
 
-  /** Every request of the last ~65 seconds across the live projects. */
+  /** Every request of the last ~65 seconds across the user's live projects. */
   @Get()
   @HttpCode(200)
   @ApiOperation({ summary: 'Get recent traffic across live projects' })
   // @ts-ignore - isolatedModules + emitDecoratorMetadata; @nestjs/swagger needs the class constructor
   @ApiResponse({ status: 200, description: 'Traffic points', type: TrafficDto })
-  current(): Traffic {
-    const cutoff = Date.now() - RECENT_WINDOW_MS;
-    const requests = this.store
-      .getRequests()
-      .filter((point) => Date.parse(point.at) >= cutoff)
-      .map(toTrafficPoint);
-    const liveProjects = this.store.getLiveDeployments().length;
-    return { requests, liveProjects };
+  @ApiResponse({ status: 401, description: 'No signed-in user' })
+  async current(@Req() req: Request): Promise<Traffic> {
+    const userId = requireUser(req).id;
+    return this.traffic.current(userId);
   }
-}
-
-function toTrafficPoint(point: TrafficPoint) {
-  return {
-    at: point.at,
-    projectId: point.projectId,
-    error: point.error,
-    city: point.city,
-    status: point.status,
-    latencyMs: point.latencyMs,
-    path: point.path,
-  };
 }

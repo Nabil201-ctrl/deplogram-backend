@@ -37,6 +37,16 @@ async function main(): Promise<void> {
     .build();
 
   const document = SwaggerModule.createDocument(app, config);
+  (document.components ??= {} as any).securitySchemes = {
+    ...(document.components?.securitySchemes ?? {}),
+    deplogram_session: {
+      type: 'apiKey',
+      in: 'cookie',
+      name: 'deplogram_session',
+      description:
+        'Signed session cookie. Obtain it by signing in at POST /v1/auth/sign-in or signing up at POST /v1/auth/sign-up.',
+    },
+  };
   writeFileSync('openapi.json', JSON.stringify(document, null, 2) + '\n');
 
   await app.close();

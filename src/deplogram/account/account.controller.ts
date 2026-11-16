@@ -5,10 +5,12 @@ import {
   Get,
   HttpCode,
   Patch,
+  Req,
   UnauthorizedException,
 } from '@nestjs/common';
+import type { Request } from 'express';
 
-import { DeplogramStore } from '../store.js';
+import { DatabaseService } from '../database/database.service.js';
 import type { AccountSettings, Viewer } from '../types.js';
 import {
   ApiTags,
@@ -18,32 +20,31 @@ import {
   ApiCookieAuth,
 } from '@nestjs/swagger';
 import { AccountSettingsDto } from './dto.js';
+import { requireUser } from '../auth/require-auth.js';
 
 /**
  * Everything about the signed-in account: its settings and its own deletion.
+ * Every endpoint is guarded by the session cookie.
  */
 @ApiTags('me')
 @ApiCookieAuth('deplogram_session')
 @Controller('v1/me')
 export class AccountController {
-  constructor(private readonly store: DeplogramStore) {}
+  constructor(private readonly db: DatabaseService) {}
 
-  /** The signed-in user, or 401 when nobody is signed in. */
+  /** The signed-in viewer, or 401 when nobody is signed in. */
   @Get()
   @HttpCode(200)
   @ApiOperation({ summary: 'Get the signed-in viewer', description: 'Returns 401 when signed out.' })
   @ApiResponse({ status: 200, description: 'The signed-in user', type: Object })
   @ApiResponse({ status: 401, description: 'No signed-in user' })
-  me(): Viewer {
-    const viewer = this.store.getViewer();
-    if (!viewer) throw new UnauthorizedException('No signed-in user');
-    return viewer;
+  async me(@Req() req: Request): Promise<Viewer> {
+    const user = requireUser(req);
+    return user;
   }
 
-  /** The endpoints below belong to the signed-in user — without a session they answer 401. */
-  private signedIn(): void {
-    if (!this.store.getViewer())
-      throw new UnauthorizedException('No signed-in user');
+  private signedIn(req: Request): void {
+    requireUser(req);
   }
 
   @Get('settings')
@@ -51,9 +52,9 @@ export class AccountController {
   @ApiOperation({ summary: 'Get account settings and preferences' })
   @ApiResponse({ status: 200, description: 'Account settings', type: AccountSettingsDto })
   @ApiResponse({ status: 401, description: 'No signed-in user' })
-  getSettings(): AccountSettings {
-    this.signedIn();
-    return this.store.getAccountSettings();
+  async getSettings(@Req() req: Request): Promise<AccountSettings> {
+    this.signedIn(req);
+    return this.db.getAccountSettings(requireUser(req).id);
   }
 
   @Patch('settings')
@@ -62,10 +63,10 @@ export class AccountController {
   @ApiBody({ type: AccountSettingsDto })
   @ApiResponse({ status: 200, description: 'Updated account settings', type: AccountSettingsDto })
   @ApiResponse({ status: 401, description: 'No signed-in user' })
-  updateSettings(@Body() body: AccountSettings): AccountSettings {
-    this.signedIn();
-    this.store.updateAccountSettings(body);
-    return this.store.getAccountSettings();
+  async updateSettings(@Req() req: Request, @Body() body: AccountSettings): Promise<AccountSettings> {
+    this.signedIn(req);
+    await this.db.updateAccountSettings(requireUser(req).id, body);
+    return this.db.getAccountSettings(requireUser(req).id);
   }
 
   @Delete()
@@ -73,8 +74,8 @@ export class AccountController {
   @ApiOperation({ summary: 'Delete the signed-in account' })
   @ApiResponse({ status: 204, description: 'Account deleted' })
   @ApiResponse({ status: 401, description: 'No signed-in user' })
-  deleteAccount(): void {
-    this.signedIn();
-    this.store.deleteAccount();
+  async deleteAccount(@Req() req: Request): Promise<void> {
+    this.signedIn(req);
+    await this.db.deleteAccount(requireUser(req).id);
   }
 }

@@ -1,26 +1,22 @@
 import { Injectable } from '@nestjs/common';
 
-import { DeplogramStore } from '../store.js';
+import { DatabaseService } from '../database/database.service.js';
+import type { Viewer } from '../types.js';
 
 /**
- * Authentication is owned by the backend: the frontend only reads who is signed
- * in and calls sign-in / sign-out. Sessions live in memory, so signing out ends
- * them for good.
+ * Authentication helpers backed by the database. The authenticated viewer is
+ * resolved per request from the session cookie (see SessionMiddleware) and
+ * attached to the request; there is no shared singleton current user.
  */
 @Injectable()
 export class AuthService {
-  constructor(private readonly store: DeplogramStore) {}
+  constructor(private readonly db: DatabaseService) {}
 
-  /** The signed-in user, or null once signed out. */
-  getViewer() {
-    return this.store.getViewer();
+  async signIn(email: string, password: string): Promise<Viewer> {
+    return this.db.signIn(email, password);
   }
 
-  signIn(email: string, password: string) {
-    return this.store.signIn(email, password);
-  }
-
-  signOut(sessionToken: string | null): void {
-    this.store.signOut(sessionToken);
+  async signOut(sessionToken: string | null): Promise<void> {
+    if (sessionToken) await this.db.endSession(sessionToken);
   }
 }

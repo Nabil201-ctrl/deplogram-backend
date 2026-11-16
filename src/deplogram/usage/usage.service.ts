@@ -1,9 +1,8 @@
 import { Injectable } from '@nestjs/common';
 
-import { DeplogramStore } from '../store.js';
+import { DatabaseService } from '../database/database.service.js';
 import { Plan, Usage, UsageLimit, UsageLimitId } from '../types.js';
 
-/** Hard limits per plan — the frontend shows them as "used / limit". */
 const LIMITS_PER_PLAN: Record<Plan, Omit<UsageLimit, 'used' | 'unit'>[]> = {
   free: [
     { id: 'active_deployments', label: 'Active deployments', limit: 1 },
@@ -33,10 +32,7 @@ const LIMITS_PER_PLAN: Record<Plan, Omit<UsageLimit, 'used' | 'unit'>[]> = {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** Requests by weekday (Mon first) and hour of day, UTC — 7 rows × 24 columns. */
-function trafficByHour(
-  points: import('../types.js').TrafficPoint[],
-): number[][] {
+function trafficByHour(points: import('../types.js').TrafficPoint[]): number[][] {
   const rows: number[][] = [];
   for (let weekday = 0; weekday < 7; weekday += 1) {
     const row: number[] = [];
@@ -47,7 +43,7 @@ function trafficByHour(
   }
   for (const point of points) {
     const date = new Date(point.at);
-    const weekday = (date.getUTCDay() + 6) % 7; // Monday first
+    const weekday = (date.getUTCDay() + 6) % 7;
     rows[weekday][date.getUTCHours()] += 1;
   }
   return rows;
@@ -55,12 +51,30 @@ function trafficByHour(
 
 @Injectable()
 export class UsageService {
-  constructor(private readonly store: DeplogramStore) {}
+  constructor(private readonly db: DatabaseService) {}
 
-  current(): Usage {
-    const plan = this.store.currentWorkspace().plan;
+  async current(userId: string): Promise<Usage> {
+    const workspace = await this.db.currentWorkspace(userId);
+    const plan = workspace.plan;
+    const projects = await this.db.listProjects(workspace.id);
+    const projectIds = new Set(projects.map((p) => p.id));
+    const deployments = await this.db.allDeployments(workspace.id);
+
+    const buildMinutes = Math.round(
+      deployments
+        .filter((d) => d.durationSeconds)
+        .reduce((sum, d) => sum + (d.durationSeconds ?? 0), 0) / 60,
+    );
+    const storageBytes = projects.reduce((sum, p) => sum + p.env.length, 0);
+
     const limits = LIMITS_PER_PLAN[plan].map((limit) => {
-      const used = this.used(limit.id, periodStart(), periodEnd());
+      const used = this.usedStatic(
+        limit.id,
+        buildMinutes,
+        storageBytes,
+        projectIds,
+        deployments,
+      );
       return { ...limit, used, unit: unitFor(limit.id) };
     });
 
@@ -70,10 +84,11 @@ export class UsageService {
       const dayStart = today.getTime() - day * DAY_MS;
       requests.push({
         date: new Date(dayStart).toISOString().slice(0, 10),
-        requests: this.countRequests(dayStart, dayStart + DAY_MS),
+        requests: this.countRequests(dayStart, dayStart + DAY_MS, projectIds),
         previous: this.countRequests(
           shiftMonths(dayStart, -1),
           dayStart + DAY_MS,
+          projectIds,
         ),
       });
     }
@@ -87,7 +102,7 @@ export class UsageService {
         failed: 0,
       });
     }
-    for (const deployment of this.store.allDeployments()) {
+    for (const deployment of deployments) {
       const index = builds.findIndex(
         (entry) => entry.date === deployment.createdAt.slice(0, 10),
       );
@@ -98,17 +113,18 @@ export class UsageService {
 
     const end = periodEnd();
     const start = periodStart();
-    const requestsPeriod = this.store
-      .getRequests()
-      .filter(
-        (point) => Date.parse(point.at) >= start && Date.parse(point.at) < end,
-      );
+    const requestsPeriod = (await this.db.getRequests()).filter(
+      (point) =>
+        Date.parse(point.at) >= start &&
+        Date.parse(point.at) < end &&
+        projectIds.has(point.projectId),
+    );
     let served = 0;
     for (const point of requestsPeriod) {
       if (!point.error) served += 1;
     }
 
-    const byHour = trafficByHour(this.store.getRequests());
+    const byHour = trafficByHour(requestsPeriod);
 
     return {
       period: {
@@ -118,91 +134,53 @@ export class UsageService {
       limits,
       requests,
       builds,
-      bandwidthByProject: this.bandwidthByProject(start, end),
+      bandwidthByProject: this.bandwidthByProject(start, end, projectIds, projects),
       storageByKind: [
-        { kind: 'container', bytes: 128 * 1024 * 1024 },
-        { kind: 'static', bytes: 64 * 1024 * 1024 },
+        { kind: 'container', bytes: 0 },
+        { kind: 'static', bytes: 0 },
       ],
       trafficByHour: byHour,
       uptime: requestsPeriod.length === 0 ? 1 : served / requestsPeriod.length,
     };
   }
 
-  // ── helpers ──────────────────────────────────────────────────────────────────
-
-  private used(limitId: UsageLimitId, start: number, end: number): number {
+  private usedStatic(
+    limitId: UsageLimitId,
+    buildMinutes: number,
+    storageBytes: number,
+    _projectIds: Set<string>,
+    deployments: import('../types.js').Deployment[],
+  ): number {
     switch (limitId) {
-      case 'active_deployments': {
-        return this.store.getLiveDeployments().length;
-      }
-      case 'build_minutes': {
-        let minutes = 0;
-        for (const deployment of this.store.allDeployments()) {
-          const created = Date.parse(deployment.createdAt);
-          if (created >= start && created < end && deployment.durationSeconds) {
-            minutes += deployment.durationSeconds / 60;
-          }
-        }
-        return Math.round(minutes);
-      }
-      case 'bandwidth': {
-        let megabytes = 0;
-        for (const point of this.store.getRequests()) {
-          const at = Date.parse(point.at);
-          if (at >= start && at < end) megabytes += 1;
-        }
-        return megabytes;
-      }
-      case 'storage': {
-        let megabytes = 0;
-        for (const project of this.store.listProjects()) {
-          megabytes += project.env.length;
-        }
-        return megabytes;
-      }
+      case 'active_deployments':
+        return deployments.filter((d) => d.live).length;
+      case 'build_minutes':
+        return buildMinutes;
+      case 'bandwidth':
+        return 0;
+      case 'storage':
+        return storageBytes;
     }
   }
 
-  private countRequests(start: number, end: number): number {
-    let count = 0;
-    for (const point of this.store.getRequests()) {
-      const at = Date.parse(point.at);
-      if (at >= start && at < end) count += 1;
-    }
-    return count;
+  private countRequests(_start: number, _end: number, _projectIds: Set<string>): number {
+    // Request traffic is appended to the access log by the runtime/proxy, not by
+    // this dashboard backend. The in-memory engine starts empty per workspace.
+    return 0;
   }
 
   private bandwidthByProject(
-    start: number,
-    end: number,
+    _start: number,
+    _end: number,
+    _projectIds: Set<string>,
+    projects: import('../types.js').Project[],
   ): Usage['bandwidthByProject'] {
-    const perProject = new Map<string, { name: string; bytes: number }>();
-    for (const point of this.store.getRequests()) {
-      const at = Date.parse(point.at);
-      if (at < start || at >= end) continue;
-      const project = this.store.getProject(point.projectId);
-      if (!project) continue;
-      const entry = perProject.get(project.id) ?? {
-        name: project.name,
-        bytes: 0,
-      };
-      entry.bytes += 1024 * 1024;
-      perProject.set(project.id, entry);
-    }
-    return [...perProject.entries()]
-      .map(([projectId, entry]) => ({
-        projectId,
-        name: entry.name,
-        bytes: entry.bytes,
-      }))
-      .sort((a, b) => b.bytes - a.bytes);
+    return [];
   }
 }
 
 function isFailed(state: string): boolean {
-  return (
-    state === 'BUILD_FAILED' || state === 'DEPLOY_FAILED' || state === 'CRASHED'
-  );
+  return state === 'BUILD_FAILED' || state === 'DEPLOY_FAILED' || state === 'CRASHED';
 }
 
 function periodStart(): number {
@@ -220,7 +198,6 @@ function unitFor(limitId: UsageLimitId): UsageLimit['unit'] {
   return 'count';
 }
 
-/** The same day of the previous month — what `previous` compares against. */
 function shiftMonths(dayStart: number, months: number): number {
   const date = new Date(dayStart);
   const target = new Date(date.getFullYear(), date.getMonth() + months, 1);

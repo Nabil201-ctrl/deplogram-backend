@@ -17,7 +17,7 @@ import {
   ApiResponse,
 } from '@nestjs/swagger';
 
-import { DeplogramStore } from '../store.js';
+import { DatabaseService } from '../database/database.service.js';
 import type { Viewer } from '../types.js';
 import { SESSION_COOKIE } from './session.middleware.js';
 import { SignInDto, SignUpDto, ViewerDto } from './dto.js';
@@ -26,14 +26,15 @@ import { SignInDto, SignUpDto, ViewerDto } from './dto.js';
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 
 /**
- * Authentication is owned by the backend: the frontend only reads who is signed
- * in and calls sign-in / sign-up / sign-out. Sessions live in a cookie
- * (`deplogram_session`), so signing out clears it for good.
+ * Authentication is owned by the backend. Sessions are signed JWTs stored in a
+ * `deplogram_session` cookie and backed by server-side session rows in the
+ * database, so they survive deploys and cold starts. Signing out revokes the
+ * session row and clears the cookie.
  */
 @ApiTags('auth')
 @Controller('v1/auth')
 export class AuthController {
-  constructor(private readonly store: DeplogramStore) {}
+  constructor(private readonly db: DatabaseService) {}
 
   @Post('sign-in')
   @HttpCode(200)
@@ -43,11 +44,11 @@ export class AuthController {
   @ApiResponse({ status: 400, description: 'Missing fields' })
   @ApiResponse({ status: 401, description: 'Invalid email or password' })
   @ApiResponse({ status: 403, description: 'Sign-in is disabled' })
-  signIn(
+  async signIn(
     @Body() body: SignInDto,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
-  ): Viewer {
+  ): Promise<Viewer> {
     if (process.env.SIGN_IN_ENABLED === 'false') {
       throw new UnauthorizedException('Sign-in is disabled');
     }
@@ -57,30 +58,21 @@ export class AuthController {
       throw new BadRequestException('Enter your email and password');
     }
 
-    let session: { viewer: Viewer; sessionToken: string };
+    let viewer: Viewer;
     try {
-      session = this.store.signIn(email, password);
+      viewer = await this.db.signIn(email, password);
     } catch {
       throw new UnauthorizedException('Invalid email or password');
     }
-    this.store.registerSession(
-      session.sessionToken,
-      session.viewer.id,
-      {
-        browser: req.headers['user-agent']?.split('/')[0] ?? 'unknown',
-        os: 'unknown',
-        device: /Mobile|Android|iPhone|iPad/.test(req.headers['user-agent'] ?? '') ? 'mobile' : 'desktop',
-        location: null,
-        ip: req.ip ?? '0.0.0.0',
-      },
-    );
-    res.setHeader('Set-Cookie', this.sessionCookie(session.sessionToken));
-    return session.viewer;
+    const sessionToken = await this.db.createSession(viewer.id, this.sessionInfo(req));
+    res.setHeader('Set-Cookie', this.sessionCookie(sessionToken));
+    return viewer;
   }
 
   /**
    * Creates an account and starts a session. The web sign-up form posts
-   * `{ name, email, password }`; the viewer it returns matches `viewerSchema`.
+   * `{ name, email, password }`. A new account gets an empty personal workspace
+   * and returns no seeded demo records.
    */
   @Post('sign-up')
   @HttpCode(201)
@@ -89,11 +81,11 @@ export class AuthController {
   @ApiResponse({ status: 201, description: 'Account created + session cookie set', type: ViewerDto })
   @ApiResponse({ status: 400, description: 'Validation error' })
   @ApiResponse({ status: 409, description: 'Email already registered' })
-  signUp(
+  async signUp(
     @Body() body: SignUpDto,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
-  ): Viewer {
+  ): Promise<Viewer> {
     const name = typeof body?.name === 'string' ? body.name.trim() : '';
     const email =
       typeof body?.email === 'string' ? body.email.trim().toLowerCase() : '';
@@ -109,27 +101,23 @@ export class AuthController {
     if (password.length < 8) {
       throw new BadRequestException('Password must be at least 8 characters');
     }
-    if (this.store.findUserByEmail(email)) {
-      throw new ConflictException('That email is already registered');
-    }
 
-    const { viewer, sessionToken } = this.store.signUp({
-      name,
-      email,
-      password,
-    });
-    this.store.registerSession(
-      sessionToken,
-      viewer.id,
-      {
-        browser: req.headers['user-agent']?.split('/')[0] ?? 'unknown',
-        os: 'unknown',
-        device: /Mobile|Android|iPhone|iPad/.test(req.headers['user-agent'] ?? '') ? 'mobile' : 'desktop',
-        location: null,
-        ip: req.ip ?? '0.0.0.0',
-      },
-    );
-    res.setHeader('Set-Cookie', this.sessionCookie(sessionToken));
+    let viewer: Viewer;
+    let sessionToken: string;
+    try {
+      const result = await this.db.signUp({ name, email, password });
+      viewer = result.viewer;
+      sessionToken = result.sessionToken;
+    } catch (error) {
+      if ((error as Error)?.message === 'Email already registered') {
+        throw new ConflictException('That email is already registered');
+      }
+      throw error;
+    }
+    // Re-create the session with the request's client info (signUp used defaults).
+    await this.db.endSession(sessionToken).catch(() => undefined);
+    const freshToken = await this.db.createSession(viewer.id, this.sessionInfo(req));
+    res.setHeader('Set-Cookie', this.sessionCookie(freshToken));
     return viewer;
   }
 
@@ -137,13 +125,23 @@ export class AuthController {
   @HttpCode(204)
   @ApiOperation({ summary: 'Sign out and clear the session cookie' })
   @ApiResponse({ status: 204, description: 'Session cleared' })
-  signOut(
+  async signOut(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
-  ): void {
+  ): Promise<void> {
     const token = req.cookies?.[SESSION_COOKIE] ?? null;
-    this.store.signOut(token);
+    if (token) await this.db.endSession(token);
     res.setHeader('Set-Cookie', this.expiredSessionCookie());
+  }
+
+  private sessionInfo(req: Request): import('../database/database.js').SessionInfo {
+    return {
+      browser: req.headers['user-agent']?.split('/')[0] ?? 'unknown',
+      os: 'unknown',
+      device: /Mobile|Android|iPhone|iPad/.test(req.headers['user-agent'] ?? '') ? 'mobile' : 'desktop',
+      location: null,
+      ip: req.ip ?? '0.0.0.0',
+    };
   }
 
   private sessionCookie(token: string): string {

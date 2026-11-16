@@ -4,10 +4,11 @@ import {
   Get,
   HttpCode,
   Patch,
-  UnauthorizedException,
+  Req,
 } from '@nestjs/common';
+import type { Request } from 'express';
 
-import { DeplogramStore } from '../store.js';
+import { DatabaseService } from '../database/database.service.js';
 import {
   ApiTags,
   ApiOperation,
@@ -16,16 +17,16 @@ import {
   ApiCookieAuth,
 } from '@nestjs/swagger';
 import { NotificationSettingsDto, NotificationUpdateDto } from './dto.js';
+import { requireUser } from '../auth/require-auth.js';
 
 @ApiTags('me')
 @ApiCookieAuth('deplogram_session')
 @Controller('v1/me')
 export class NotificationsController {
-  constructor(private readonly store: DeplogramStore) {}
+  constructor(private readonly db: DatabaseService) {}
 
-  private requireSignedIn(): void {
-    if (!this.store.getViewer())
-      throw new UnauthorizedException('No signed-in user');
+  private viewer(req: Request) {
+    return requireUser(req);
   }
 
   @Get('notifications')
@@ -33,9 +34,9 @@ export class NotificationsController {
   @ApiOperation({ summary: 'Get notification settings' })
   @ApiResponse({ status: 200, description: 'Notification settings', type: NotificationSettingsDto })
   @ApiResponse({ status: 401, description: 'No signed-in user' })
-  getNotifications(): NotificationSettingsDto {
-    this.requireSignedIn();
-    return this.store.getNotificationSettings();
+  async getNotifications(@Req() req: Request): Promise<NotificationSettingsDto> {
+    this.viewer(req);
+    return this.db.getNotificationSettings(requireUser(req).id);
   }
 
   @Patch('notifications')
@@ -44,8 +45,8 @@ export class NotificationsController {
   @ApiBody({ type: NotificationUpdateDto })
   @ApiResponse({ status: 200, description: 'Updated notification settings', type: NotificationSettingsDto })
   @ApiResponse({ status: 401, description: 'No signed-in user' })
-  updateNotifications(@Body() body: NotificationUpdateDto): NotificationSettingsDto {
-    this.requireSignedIn();
-    return this.store.updateNotificationSettings(body);
+  async updateNotifications(@Req() req: Request, @Body() body: NotificationUpdateDto): Promise<NotificationSettingsDto> {
+    this.viewer(req);
+    return this.db.updateNotificationSettings(requireUser(req).id, body);
   }
 }

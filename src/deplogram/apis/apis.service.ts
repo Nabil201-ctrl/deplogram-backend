@@ -1,35 +1,35 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 
-import { DeplogramStore } from '../store.js';
+import { DatabaseService } from '../database/database.service.js';
 import type { ApiId, TryRequest } from '../types.js';
 
 @Injectable()
 export class ApisService {
-  constructor(private readonly store: DeplogramStore) {}
+  constructor(private readonly store: DatabaseService) {}
 
-  usage() {
+  async usage() {
     return this.store.getApiUsage();
   }
 
-  requests(api?: ApiId) {
-    return { items: this.store.listApiRequests(api) };
+  async requests(api?: ApiId) {
+    return { items: await this.store.listApiRequests(api) };
   }
 
-  try(request: TryRequest) {
+  async try(request: TryRequest) {
     return this.store.tryApi(request);
   }
 
-  keys() {
-    return { items: this.store.listApiKeys() };
+  async keys(userId: string) {
+    return { items: await this.store.listApiKeys(userId) };
   }
 
-  createKey(name: string, mode: 'live' | 'test', access: string[]) {
+  async createKey(userId: string, name: string, mode: 'live' | 'test', access: string[]) {
     const validAccess = access.filter((a) => ['otp', 'email', 'images', 'qr'].includes(a)) as ApiId[];
-    return this.store.createApiKey({ name, mode, access: validAccess });
+    return this.store.createApiKey(userId, { name, mode, access: validAccess });
   }
 
-  revokeKey(id: string) {
-    const revoked = this.store.revokeApiKey(id);
+  async revokeKey(userId: string, id: string) {
+    const revoked = await this.store.revokeApiKey(id);
     if (!revoked) throw new NotFoundException('That key does not exist.');
   }
 }

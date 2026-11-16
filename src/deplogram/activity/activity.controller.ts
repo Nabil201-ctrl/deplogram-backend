@@ -1,37 +1,21 @@
-import {
-  Controller,
-  Get,
-  HttpCode,
-  Query,
-} from '@nestjs/common';
+import { Controller, Get, HttpCode, Query, Req } from '@nestjs/common';
+import type { Request } from 'express';
 
-import { DeplogramStore } from '../store.js';
+import { DatabaseService } from '../database/database.service.js';
 import type { ActivityFilter, ActivityPage, ActivityType } from '../types.js';
 import {
   ApiTags,
   ApiOperation,
   ApiQuery,
   ApiResponse,
+  ApiCookieAuth,
 } from '@nestjs/swagger';
 import { ActivityPageDto } from './dto.js';
+import { requireUser } from '../auth/require-auth.js';
 
-/**
- * Maps the frontend's activity filter groups to the activity types they include.
- */
 const FILTER_TYPES: Record<string, ActivityType[]> = {
-  deploys: [
-    'deployment.started',
-    'deployment.succeeded',
-    'deployment.failed',
-    'deployment.rolled_back',
-  ],
-  changes: [
-    'project.created',
-    'project.renamed',
-    'project.deleted',
-    'env.updated',
-    'settings.updated',
-  ],
+  deploys: ['deployment.started', 'deployment.succeeded', 'deployment.failed', 'deployment.rolled_back'],
+  changes: ['project.created', 'project.renamed', 'project.deleted', 'env.updated', 'settings.updated'],
   failures: ['deployment.failed'],
 };
 
@@ -39,11 +23,13 @@ const FILTER_TYPES: Record<string, ActivityType[]> = {
  * The activity timeline — deployments started/succeeded/failed/rolled back,
  * projects created/renamed/deleted, variable and settings changes.
  * Cursor-paginated; events are immutable (the audit log).
+ * Scoped to the signed-in user's workspace.
  */
 @ApiTags('activity')
+@ApiCookieAuth('deplogram_session')
 @Controller('v1/activity')
 export class ActivityController {
-  constructor(private readonly store: DeplogramStore) {}
+  constructor(private readonly store: DatabaseService) {}
 
   @Get()
   @HttpCode(200)
@@ -53,17 +39,21 @@ export class ActivityController {
   @ApiQuery({ name: 'cursor', type: String, required: false, example: 'evt_abc123' })
   @ApiQuery({ name: 'limit', type: Number, required: false, example: 25 })
   @ApiResponse({ status: 200, description: 'Activity page', type: ActivityPageDto })
-  page(
+  @ApiResponse({ status: 401, description: 'No signed-in user' })
+  async page(
+    @Req() req: Request,
     @Query('type') type: ActivityFilter | undefined,
     @Query('project') project: string | undefined,
     @Query('cursor') cursor: string | null,
     @Query('limit') limit: string | undefined,
-  ): ActivityPage {
-    const page = this.store.activityPage(cursor ?? null, limit ? Number(limit) : 25);
+  ): Promise<ActivityPage> {
+    const userId = requireUser(req).id;
+    const workspace = await this.store.currentWorkspace(userId);
+    const page = await this.store.activityPage(cursor ?? null, limit ? Number(limit) : 25, workspace.id);
     let items = page.items;
     if (type && type !== 'all') {
       const allowed = FILTER_TYPES[type] ?? [];
-      items = items.filter((event) => allowed.includes(event.type));
+      items = items.filter((event) => allowed.includes(event.type as ActivityType));
     }
     if (project)
       items = items.filter(

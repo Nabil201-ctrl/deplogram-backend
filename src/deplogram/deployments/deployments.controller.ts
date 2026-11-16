@@ -6,7 +6,9 @@ import {
   Param,
   Post,
   Query,
+  Req,
 } from '@nestjs/common';
+import type { Request } from 'express';
 
 import { DeploymentService } from './deployments.service.js';
 import {
@@ -15,6 +17,7 @@ import {
   ApiQuery,
   ApiParam,
   ApiResponse,
+  ApiCookieAuth,
 } from '@nestjs/swagger';
 import {
   DeploymentDto,
@@ -22,12 +25,14 @@ import {
   DeploymentPageDto,
   RollbackResultDto,
 } from './dto.js';
+import { requireUser } from '../auth/require-auth.js';
 
 /**
  * Deployments: the list, one deployment, its build log, and the actions that
- * create or undo deployments.
+ * create or undo deployments. Scoped to the signed-in user's workspace.
  */
 @ApiTags('deployments')
+@ApiCookieAuth('deplogram_session')
 @Controller('v1/deployments')
 export class DeploymentController {
   constructor(private readonly deployments: DeploymentService) {}
@@ -44,8 +49,10 @@ export class DeploymentController {
   @ApiQuery({ name: 'page', type: Number, required: false, example: 1 })
   @ApiQuery({ name: 'pageSize', type: Number, required: false, example: 20 })
   @ApiResponse({ status: 200, description: 'Paged deployment list', type: DeploymentPageDto })
-  list(@Query() query: Record<string, string | string[] | undefined>) {
-    return this.deployments.list(parseListQuery(query));
+  @ApiResponse({ status: 401, description: 'No signed-in user' })
+  async list(@Req() req: Request, @Query() query: Record<string, string | string[] | undefined>) {
+    const userId = requireUser(req).id;
+    return this.deployments.list(userId, parseListQuery(query));
   }
 
   @Get(':id')
@@ -53,9 +60,11 @@ export class DeploymentController {
   @ApiOperation({ summary: 'Get one deployment' })
   @ApiParam({ name: 'id', type: String, example: 'dep_live' })
   @ApiResponse({ status: 200, description: 'The deployment', type: DeploymentDto })
+  @ApiResponse({ status: 401, description: 'No signed-in user' })
   @ApiResponse({ status: 404, description: 'Deployment not found' })
-  getDeployment(@Param('id') id: string) {
-    const deployment = this.deployments.getDeployment(id);
+  async getDeployment(@Req() req: Request, @Param('id') id: string) {
+    requireUser(req);
+    const deployment = await this.deployments.getDeployment(id);
     if (!deployment) throw new NotFoundException('That deployment does not exist.');
     return deployment;
   }
@@ -66,9 +75,11 @@ export class DeploymentController {
   @ApiParam({ name: 'id', type: String, example: 'dep_live' })
   @ApiQuery({ name: 'after', type: Number, required: false, example: 0 })
   @ApiResponse({ status: 200, description: 'Build log lines and step states', type: DeploymentLogsDto })
+  @ApiResponse({ status: 401, description: 'No signed-in user' })
   @ApiResponse({ status: 404, description: 'Deployment not found' })
-  getLogs(@Param('id') id: string, @Query('after') after?: string) {
-    const deployment = this.deployments.getDeployment(id);
+  async getLogs(@Req() req: Request, @Param('id') id: string, @Query('after') after?: string) {
+    requireUser(req);
+    const deployment = await this.deployments.getDeployment(id);
     if (!deployment) throw new NotFoundException('That deployment does not exist.');
     return this.deployments.getLogs(id, Number(after ?? 0));
   }
@@ -78,8 +89,10 @@ export class DeploymentController {
   @ApiOperation({ summary: 'Build the same commit again' })
   @ApiParam({ name: 'id', type: String, example: 'dep_live' })
   @ApiResponse({ status: 201, description: 'New deployment (QUEUED)', type: DeploymentDto })
+  @ApiResponse({ status: 401, description: 'No signed-in user' })
   @ApiResponse({ status: 404, description: 'Deployment not found' })
-  redeploy(@Param('id') id: string) {
+  async redeploy(@Req() req: Request, @Param('id') id: string) {
+    requireUser(req);
     return this.deployments.redeploy(id);
   }
 
@@ -88,9 +101,11 @@ export class DeploymentController {
   @ApiOperation({ summary: 'Roll back to an earlier deployment by creating a new rollback deployment' })
   @ApiParam({ name: 'id', type: String, example: 'dep_old_1' })
   @ApiResponse({ status: 201, description: 'Rollback result', type: RollbackResultDto })
+  @ApiResponse({ status: 401, description: 'No signed-in user' })
   @ApiResponse({ status: 404, description: 'Deployment not found' })
   @ApiResponse({ status: 409, description: 'No earlier deployment to roll back to' })
-  rollback(@Param('id') id: string) {
+  async rollback(@Req() req: Request, @Param('id') id: string) {
+    requireUser(req);
     return this.deployments.rollback(id);
   }
 }
@@ -132,4 +147,15 @@ export function parseListQuery(
     page: Number(query.page ?? 1) || 1,
     pageSize: Number(query.pageSize ?? 20) || 20,
   };
+}
+
+export interface DeploymentListQuery {
+  q?: string;
+  status?: string[];
+  project?: string[];
+  branch?: string[];
+  trigger?: string[];
+  sort?: string;
+  page?: string;
+  pageSize?: string;
 }

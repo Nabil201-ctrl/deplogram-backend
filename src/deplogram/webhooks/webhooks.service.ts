@@ -1,32 +1,32 @@
 import { Injectable, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
 
-import { DeplogramStore } from '../store.js';
+import { DatabaseService } from '../database/database.service.js';
 import type { WebhookSample } from '../types.js';
 
 @Injectable()
 export class WebhooksService {
-  constructor(private readonly store: DeplogramStore) {}
+  constructor(private readonly store: DatabaseService) {}
 
-  endpoint() {
-    const endpoint = this.store.getWebhookEndpoint();
+  async endpoint(workspaceId: string) {
+    const endpoint = await this.store.getWebhookEndpoint(workspaceId);
     if (!endpoint) throw new NotFoundException('No webhook endpoint yet.');
     return endpoint;
   }
 
-  rotate() {
-    return this.store.rotateWebhookEndpoint();
+  async rotate(workspaceId: string) {
+    return this.store.rotateWebhookEndpoint(workspaceId);
   }
 
-  list() {
-    return { items: this.store.listWebhookRequests() };
+  async list(workspaceId: string) {
+    return { items: await this.store.listWebhookRequests(workspaceId) };
   }
 
-  clear() {
-    this.store.clearWebhookRequests();
+  async clear(workspaceId: string) {
+    await this.store.clearWebhookRequests(workspaceId);
   }
 
-  test(sample: WebhookSample) {
-    const request = this.store.captureWebhookRequest({
+  async test(workspaceId: string, sample: WebhookSample) {
+    const request = await this.store.captureWebhookRequest(workspaceId, {
       method: 'POST',
       path: sample === 'form' ? '/signup' : '/',
       query: sample === 'form' ? [['ref', 'newsletter']] : [],
@@ -39,8 +39,8 @@ export class WebhooksService {
     return request;
   }
 
-  replay(id: string, url: string) {
-    const request = this.store.getWebhookRequest(id);
+  async replay(workspaceId: string, id: string, url: string) {
+    const request = await this.store.getWebhookRequest(id);
     if (!request) throw new NotFoundException('That request is gone.');
     if (!/^https?:\/\//.test(url)) {
       throw new UnprocessableEntityException('Use a full address starting with https://');

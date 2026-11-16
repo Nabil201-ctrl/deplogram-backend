@@ -76,8 +76,6 @@ export interface User {
   email: string;
   name: string;
   image: string | null;
-  /** Demo only — a real deployment hashes this before storing it. */
-  password: string;
   createdAt: string;
 }
 
@@ -154,9 +152,10 @@ export interface Project extends ProjectSummary {
   createdAt: string;
   liveDeploymentId: string | null;
   envCount: number;
-  config: ProjectConfig;
-  /** The variables, with their current values. */
+  config: DeploymentConfigSnapshot;
   env: ProjectEnvVar[];
+  /** Workspace the project belongs to (populated internally). */
+  workspaceId?: string;
 }
 
 export type EnvVarRecord = { key: string; updatedAt: string };
@@ -212,6 +211,7 @@ export interface DeploymentConfigSnapshot {
   startCommand: string | null;
   /** null for static sites (served from storage, no container). */
   port: number | null;
+  rootDirectory: string | null;
 }
 
 export interface Deployment {
@@ -289,6 +289,8 @@ export interface ActivityEvent {
   at: string;
   type: ActivityType;
   actor: { name: string };
+  /** Workspace the event belongs to (null for system events). */
+  workspaceId: string | null;
   project: { id: string | null; name: string } | null;
   deployment: {
     id: string;
@@ -437,6 +439,8 @@ export interface StorageItem {
   name: string;
   /** Full path from the top of the drive, e.g. "assets/logos/logo.svg". */
   path: string;
+  /** Workspace this item belongs to (populated internally). */
+  workspaceId?: string;
   /** Bytes; for a folder, everything inside it. */
   size: number;
   /** Files only: MIME type. */

@@ -1,5 +1,6 @@
 import { ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import cookieParser from 'cookie-parser';
 import type { INestApplication } from '@nestjs/common';
 
 /**
@@ -8,6 +9,8 @@ import type { INestApplication } from '@nestjs/common';
  * `api/index.ts` (Vercel serverless).
  */
 export function configureApp(app: INestApplication): void {
+  app.use(cookieParser());
+
   // The web client sends `credentials: "include"`, so the browser requires an
   // exact origin (never `*`) plus `Access-Control-Allow-Credentials`. Without
   // CORS_ORIGIN we reflect the caller's origin; in production set it to a
@@ -55,6 +58,18 @@ export function configureApp(app: INestApplication): void {
     )
     .build();
   const document = SwaggerModule.createDocument(app, config);
+  // Register the session-cookie security scheme referenced by
+  // `ApiCookieAuth('deplogram_session')` on every protected route.
+  (document.components ??= {} as any).securitySchemes = {
+    ...(document.components?.securitySchemes ?? {}),
+    deplogram_session: {
+      type: 'apiKey',
+      in: 'cookie',
+      name: 'deplogram_session',
+      description:
+        'Signed session cookie. Obtain it by signing in at POST /v1/auth/sign-in or signing up at POST /v1/auth/sign-up.',
+    },
+  };
   app.use('/api/docs-json', (req: any, res: any) => {
     res.setHeader('Content-Type', 'application/json');
     res.send(document);

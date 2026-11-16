@@ -8,7 +8,7 @@ import { ActivityModule } from './activity/activity.module.js';
 import { AuthController } from './auth/auth.controller.js';
 import { AuthService } from './auth/auth.service.js';
 import { SessionMiddleware } from './auth/session.middleware.js';
-import { DeplogramStore } from './store.js';
+import { DatabaseService } from './database/database.service.js';
 import { DeploymentController } from './deployments/deployments.controller.js';
 import { DeploymentService } from './deployments/deployments.service.js';
 import { GitModule } from './git/git.module.js';
@@ -34,8 +34,9 @@ import { ApiKeysController } from './apis/apis.controller.js';
  * Everything the web frontend needs under `/v1/*` — the product's API.
  *
  * The controllers of the feature modules live next to their services, and the
- * DeplogramStore is shared by all of them so every feature sees the same
- * records.
+ * DatabaseService is shared by all of them so every feature sees the same
+ * persisted records. Every read/write is scoped to the requesting user's
+ * workspace; there is no shared singleton current user.
  */
 @Global()
 @Module({
@@ -69,9 +70,9 @@ import { ApiKeysController } from './apis/apis.controller.js';
     StorageService,
     WebhooksService,
     ApisService,
-    DeplogramStore,
+    DatabaseService,
   ],
-  exports: [DeplogramStore],
+  exports: [DatabaseService],
 })
 export class DeplogramModule implements NestModule {
   configure(consumer: MiddlewareConsumer): void {
