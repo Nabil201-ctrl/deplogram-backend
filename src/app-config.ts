@@ -15,10 +15,11 @@ export function configureApp(app: INestApplication): void {
   // exact origin (never `*`) plus `Access-Control-Allow-Credentials`. Without
   // CORS_ORIGIN we reflect the caller's origin; in production set it to a
   // comma-separated allow-list of frontend origins.
-  const allowedOrigins = (process.env.CORS_ORIGIN ?? '')
-    .split(',')
-    .map((origin) => origin.trim())
-    .filter(Boolean);
+  const allowedOrigins = [
+    ...(process.env.CORS_ORIGIN ?? '').split(',').map((origin) => origin.trim()).filter(Boolean),
+    'https://deplogram.app',
+    'https://deplogram.onrender.com/dashboard',
+  ];
   app.enableCors({
     origin: allowedOrigins.length
       ? (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
