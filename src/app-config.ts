@@ -18,7 +18,7 @@ export function configureApp(app: INestApplication): void {
   const allowedOrigins = [
     ...(process.env.CORS_ORIGIN ?? '').split(',').map((origin) => origin.trim()).filter(Boolean),
     'https://deplogram.app',
-    'https://deplogram.onrender.com/dashboard',
+    'https://deplogram.onrender.com',
   ];
   app.enableCors({
     origin: allowedOrigins.length
