@@ -210,3 +210,23 @@ Relationships: no foreign keys; deletion does not cascade to logs/traffic/activi
 5. Wire real traffic/access log so `/v1/traffic` and metrics work.
 6. Fix filters, 404s, and `url` scheme mismatch.
 7. Decide realtime channel; switch frontend off MSW mocks to the real API.
+
+---
+
+## 11. Fix: CORS/NetworkError on `n8n.devlaws.xyz`
+
+**Symptom:** Browser console shows `NetworkError when attempting to fetch resource` + `Cross-Origin Request Blocked` for `https://n8n.devlaws.xyz/v1/auth/sign-up` and `/v1/me` (and other `/v1/*` endpoints).
+
+**Root cause:** The production Render deployment of `deplogram-web` has `NEXT_PUBLIC_API_URL=https://n8n.devlaws.xyz` set in its env vars. That host returns 502 (the backend is not deployed there — it's at `https://deplogram-backend.vercel.app`). With `NEXT_PUBLIC_API_MOCKING=partial`, MSW passes live endpoints through to the network, so the fetch hits the dead host and fails. MSW's `respondWith` rejects, surfacing as a CORS/NetworkError.
+
+**Fixes applied:**
+
+| File | Change |
+|------|--------|
+| `deplogram-web/.env.local` | Fixed local dev port `3001` → `3000` to match the backend dev port. Added warning about `n8n.devlaws.xyz`. |
+| `deplogram-web/.env.example` | Added warning: do NOT set `NEXT_PUBLIC_API_URL` to `https://n8n.devlaws.xyz`; use `https://deplogram-backend.vercel.app` or set `NEXT_PUBLIC_API_MOCKING=enabled`. |
+| `deplogram-web/src/mocks/browser.ts` | Added `onUnhandledRequest` to MSW worker that logs a clear warning when a request is passed through to an unreachable network host. |
+
+**Required action (Render dashboard):** Change `NEXT_PUBLIC_API_URL` from `https://n8n.devlaws.xyz` to `https://deplogram-backend.vercel.app`, or set `NEXT_PUBLIC_API_MOCKING=enabled` to fall back to MSW mocks until the backend is reachable.
+
+**Required action (Vercel dashboard):** The `deplogram-backend` project on Vercel has no environment variables set, causing 500 errors on `/v1/*` endpoints. Set at minimum `CORS_ORIGIN`, `JWT_SECRET`, and `SIGN_IN_ENABLED`.
